@@ -6,6 +6,10 @@ from app.db import engine, Base
 # Tüm modelleri tek seferde import et
 from app.models import *
 
-if __name__ == "__main__":
+def main():
+    """Create all database tables"""
     Base.metadata.create_all(bind=engine)
-    print("All tables created successfully.") 
+    print("All tables created successfully.")
+
+if __name__ == "__main__":
+    main() 
