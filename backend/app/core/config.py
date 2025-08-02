@@ -23,6 +23,11 @@ class Settings(BaseSettings):
     # Verification
     VERIFICATION_CODE_EXPIRE_MINUTES: int = int(os.getenv("VERIFICATION_CODE_EXPIRE_MINUTES", "10"))
     
+    # TMDB API
+    TMDB_API_KEY: str = os.getenv("TMDB_API_KEY", "")
+    
+
+    
     # Environment
     ENVIRONMENT: str = os.getenv("ENVIRONMENT", "development")
     DEBUG: bool = os.getenv("DEBUG", "True").lower() == "true"

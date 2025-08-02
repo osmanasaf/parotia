@@ -12,9 +12,13 @@ class TVService(TVServiceInterface):
         params = {"page": page}
         return self.client.make_request("tv/popular", params)
     
-    def get_tv_details(self, tv_id: int) -> TMDBResponse:
+    def get_tv_show_details(self, tv_id: int) -> TMDBResponse:
         """Get TV show details by ID"""
         return self.client.make_request(f"tv/{tv_id}")
+    
+    def get_tv_details(self, tv_id: int) -> TMDBResponse:
+        """Get TV show details by ID (alias for get_tv_show_details)"""
+        return self.get_tv_show_details(tv_id)
     
     def search_tv_shows(self, query: str, page: int = 1) -> TMDBResponse:
         """Search TV shows by query"""
@@ -24,6 +28,10 @@ class TVService(TVServiceInterface):
     def get_tv_credits(self, tv_id: int) -> TMDBResponse:
         """Get TV show credits by ID"""
         return self.client.make_request(f"tv/{tv_id}/credits")
+    
+    def get_tv_show_credits(self, tv_id: int) -> TMDBResponse:
+        """Get TV show credits by ID (alias for get_tv_credits)"""
+        return self.get_tv_credits(tv_id)
     
     def get_tv_recommendations(self, tv_id: int, page: int = 1) -> TMDBResponse:
         """Get TV show recommendations by ID"""

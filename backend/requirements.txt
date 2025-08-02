@@ -8,4 +8,9 @@ psycopg2-binary
 requests
 python-jose[cryptography]
 passlib[bcrypt]
-python-multipart 
+python-multipart
+sentence-transformers
+scikit-learn
+numpy
+faiss-cpu
+redis 

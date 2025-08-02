@@ -1,143 +1,166 @@
-from fastapi import APIRouter, HTTPException, Depends, Query, Path
-from typing import List, Dict, Optional
-import os
-from pydantic import BaseModel
-
-from app.core.tmdb_service import TMDBServiceFactory
-from app.core.interfaces import TMDBError
-
-# Pydantic models for request/response
-class TVResponse(BaseModel):
-    id: int
-    name: str
-    overview: Optional[str]
-    first_air_date: Optional[str]
-    poster_path: Optional[str]
-    vote_average: Optional[float]
-    vote_count: Optional[int]
-
-class TVSearchResponse(BaseModel):
-    page: int
-    results: List[TVResponse]
-    total_pages: int
-    total_results: int
-
-class TVCreditsResponse(BaseModel):
-    id: int
-    cast: List[Dict]
-    crew: List[Dict]
-
-class TVWatchProvidersResponse(BaseModel):
-    id: int
-    results: Dict
-
-# Dependency injection
-def get_tv_service():
-    """Dependency to get TV service instance"""
-    api_key = os.getenv("TMDB_API_KEY")
-    if not api_key:
-        raise HTTPException(status_code=500, detail="TMDB API key not configured")
-    
-    return TMDBServiceFactory.create_tv_service(api_key)
+from fastapi import APIRouter, Depends, HTTPException, status, Query
+from sqlalchemy.orm import Session
+from typing import List, Optional
+from app.db import get_db
+from app.core.auth import get_current_user
+from app.core.exceptions import BaseAppException
+from app.services.tv_service import TVService
+from app.schemas.movie import (
+    UserRatingCreate, UserRatingResponse, UserWatchlistCreate, UserWatchlistResponse
+)
 
 router = APIRouter(prefix="/tv", tags=["tv"])
 
-@router.get("/popular", response_model=TVSearchResponse)
+def handle_exception(e: Exception) -> HTTPException:
+    """Handle exceptions and convert to HTTPException"""
+    if isinstance(e, BaseAppException):
+        return HTTPException(
+            status_code=e.status_code,
+            detail=e.message
+        )
+    else:
+        return HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An internal server error occurred"
+        )
+
+# TMDB TV Operations
+@router.get("/popular")
 def get_popular_tv_shows(
-    page: int = Query(1, ge=1, le=1000, description="Page number"),
-    tv_service = Depends(get_tv_service)
+    page: int = Query(1, ge=1, description="Page number"),
+    db: Session = Depends(get_db)
 ):
     """Get popular TV shows from TMDB"""
     try:
-        response = tv_service.get_popular_tv_shows(page)
-        if response.success:
-            return TVSearchResponse(**response.data)
+        tv_service = TVService(db)
+        result = tv_service.get_popular_tv_shows(page)
+        
+        if result["success"]:
+            return result
         else:
-            raise HTTPException(status_code=response.status_code, detail="Failed to fetch popular TV shows")
-    except TMDBError as e:
-        raise HTTPException(status_code=500, detail=str(e))
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=result["error"]
+            )
+    except Exception as e:
+        raise handle_exception(e)
 
-@router.get("/search", response_model=TVSearchResponse)
+@router.get("/{tmdb_id}")
+def get_tv_show_details(
+    tmdb_id: int,
+    db: Session = Depends(get_db)
+):
+    """Get TV show details from TMDB"""
+    try:
+        tv_service = TVService(db)
+        result = tv_service.get_tv_show_details(tmdb_id)
+        
+        if result["success"]:
+            return result
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="TV show not found"
+            )
+    except Exception as e:
+        raise handle_exception(e)
+
+@router.get("/search")
 def search_tv_shows(
-    query: str = Query(..., min_length=1, description="Search query"),
-    page: int = Query(1, ge=1, le=1000, description="Page number"),
-    tv_service = Depends(get_tv_service)
+    query: str = Query(..., description="Search query"),
+    page: int = Query(1, ge=1, description="Page number"),
+    db: Session = Depends(get_db)
 ):
-    """Search TV shows by query"""
+    """Search TV shows on TMDB"""
     try:
-        response = tv_service.search_tv_shows(query, page)
-        if response.success:
-            return TVSearchResponse(**response.data)
-        else:
-            raise HTTPException(status_code=response.status_code, detail="Failed to search TV shows")
-    except TMDBError as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/{tv_id}", response_model=TVResponse)
-def get_tv_details(
-    tv_id: int = Path(..., gt=0, description="TV ID"),
-    tv_service = Depends(get_tv_service)
-):
-    """Get TV show details by ID"""
-    try:
-        response = tv_service.get_tv_details(tv_id)
-        if response.success:
-            return TVResponse(**response.data)
-        else:
-            raise HTTPException(status_code=response.status_code, detail="TV show not found")
-    except TMDBError as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/{tv_id}/credits", response_model=TVCreditsResponse)
-def get_tv_credits(
-    tv_id: int = Path(..., gt=0, description="TV ID"),
-    tv_service = Depends(get_tv_service)
-):
-    """Get TV show credits by ID"""
-    try:
-        response = tv_service.get_tv_credits(tv_id)
-        if response.success:
-            return TVCreditsResponse(**response.data)
-        else:
-            raise HTTPException(status_code=response.status_code, detail="Failed to fetch TV show credits")
-    except TMDBError as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/{tv_id}/recommendations", response_model=TVSearchResponse)
-def get_tv_recommendations(
-    tv_id: int = Path(..., gt=0, description="TV ID"),
-    page: int = Query(1, ge=1, le=1000, description="Page number"),
-    tv_service = Depends(get_tv_service)
-):
-    """Get TV show recommendations by ID"""
-    try:
-        response = tv_service.get_tv_recommendations(tv_id, page)
-        if response.success:
-            return TVSearchResponse(**response.data)
-        else:
-            raise HTTPException(status_code=response.status_code, detail="Failed to fetch recommendations")
-    except TMDBError as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/{tv_id}/watch-providers", response_model=TVWatchProvidersResponse)
-def get_tv_watch_providers(
-    tv_id: int = Path(..., gt=0, description="TV ID"),
-    locale: str = Query("US", description="Country code (e.g., TR, US, GB)"),
-    tv_service = Depends(get_tv_service)
-):
-    """Get TV show watch providers by ID"""
-    try:
-        # Create a new service instance with the specified locale
-        api_key = os.getenv("TMDB_API_KEY")
-        if not api_key:
-            raise HTTPException(status_code=500, detail="TMDB API key not configured")
+        tv_service = TVService(db)
+        result = tv_service.search_tv_shows(query, page)
         
-        service_with_locale = TMDBServiceFactory.create_tv_service(api_key, locale=locale)
-        response = service_with_locale.get_tv_watch_providers(tv_id)
-        
-        if response.success:
-            return TVWatchProvidersResponse(**response.data)
+        if result["success"]:
+            return result
         else:
-            raise HTTPException(status_code=response.status_code, detail="Failed to fetch watch providers")
-    except TMDBError as e:
-        raise HTTPException(status_code=500, detail=str(e)) 
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=result["error"]
+            )
+    except Exception as e:
+        raise handle_exception(e)
+
+# User Rating Operations for TV Shows
+@router.post("/rate", response_model=UserRatingResponse)
+def rate_tv_show(
+    rating_data: UserRatingCreate,
+    current_user_id: int = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Rate a TV show"""
+    try:
+        tv_service = TVService(db)
+        rating = tv_service.rate_tv_show(current_user_id, rating_data)
+        return rating
+    except Exception as e:
+        raise handle_exception(e)
+
+@router.get("/my/ratings", response_model=List[UserRatingResponse])
+def get_my_tv_ratings(
+    current_user_id: int = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get current user's TV show ratings"""
+    try:
+        tv_service = TVService(db)
+        ratings = tv_service.get_user_tv_ratings(current_user_id)
+        return ratings
+    except Exception as e:
+        raise handle_exception(e)
+
+# User Watchlist Operations for TV Shows
+@router.post("/watchlist", response_model=UserWatchlistResponse)
+def add_tv_show_to_watchlist(
+    watchlist_data: UserWatchlistCreate,
+    current_user_id: int = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Add TV show to user's watchlist"""
+    try:
+        tv_service = TVService(db)
+        watchlist_item = tv_service.add_tv_show_to_watchlist(current_user_id, watchlist_data)
+        return watchlist_item
+    except Exception as e:
+        raise handle_exception(e)
+
+@router.get("/my/watchlist", response_model=List[UserWatchlistResponse])
+def get_my_tv_watchlist(
+    status: Optional[str] = Query(None, description="Filter by status ('to_watch', 'watching', 'completed')"),
+    current_user_id: int = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get current user's TV show watchlist"""
+    try:
+        tv_service = TVService(db)
+        watchlist = tv_service.get_user_tv_watchlist(current_user_id, status)
+        return watchlist
+    except Exception as e:
+        raise handle_exception(e)
+
+@router.put("/watchlist/{tmdb_id}")
+def update_tv_watchlist_status(
+    tmdb_id: int,
+    status: str = Query(..., description="New status ('to_watch', 'watching', 'completed')"),
+    current_user_id: int = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Update TV show watchlist item status"""
+    try:
+        tv_service = TVService(db)
+        item = tv_service.update_tv_watchlist_status(current_user_id, tmdb_id, status)
+        
+        if item:
+            return item
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="TV show watchlist item not found"
+            )
+    except Exception as e:
+        raise handle_exception(e) 
