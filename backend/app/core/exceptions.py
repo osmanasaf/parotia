@@ -16,16 +16,40 @@ class UserAlreadyExistsException(BaseAppException):
     """Raised when user already exists"""
     def __init__(self, message: str = "User already exists"):
         super().__init__(message, status.HTTP_400_BAD_REQUEST)
+    
+    def to_dict(self):
+        """Return error response as dictionary with error code"""
+        return {
+            "error_code": "USER_ALREADY_EXISTS",
+            "message": self.message,
+            "status_code": self.status_code
+        }
 
 class InvalidCredentialsException(BaseAppException):
     """Raised when credentials are invalid"""
     def __init__(self, message: str = "Invalid credentials"):
         super().__init__(message, status.HTTP_401_UNAUTHORIZED)
+    
+    def to_dict(self):
+        """Return error response as dictionary with error code"""
+        return {
+            "error_code": "INVALID_CREDENTIALS",
+            "message": self.message,
+            "status_code": self.status_code
+        }
 
 class EmailNotVerifiedException(BaseAppException):
     """Raised when email is not verified"""
     def __init__(self, message: str = "Email not verified"):
         super().__init__(message, status.HTTP_400_BAD_REQUEST)
+    
+    def to_dict(self):
+        """Return error response as dictionary with error code"""
+        return {
+            "error_code": "EMAIL_NOT_VERIFIED",
+            "message": self.message,
+            "status_code": self.status_code
+        }
 
 class VerificationCodeExpiredException(BaseAppException):
     """Raised when verification code is expired"""

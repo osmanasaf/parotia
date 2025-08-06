@@ -4,7 +4,7 @@ from app.db import get_db
 from app.schemas.user import UserCreate, UserLogin, UserResponse, Token
 from app.services.user_service import UserService
 from app.core.auth import create_access_token, get_current_user
-from app.core.exceptions import BaseAppException
+from app.core.exceptions import BaseAppException, EmailNotVerifiedException, InvalidCredentialsException
 from app.core.config import get_settings
 from datetime import timedelta
 
@@ -13,10 +13,18 @@ router = APIRouter(prefix="/auth", tags=["authentication"])
 def handle_exception(e: Exception) -> HTTPException:
     """Handle exceptions and convert to HTTPException"""
     if isinstance(e, BaseAppException):
-        return HTTPException(
-            status_code=e.status_code,
-            detail=e.message
-        )
+        # Özel exception'lar için detaylı response
+        if hasattr(e, 'to_dict'):
+            error_data = e.to_dict()
+            return HTTPException(
+                status_code=e.status_code,
+                detail=error_data
+            )
+        else:
+            return HTTPException(
+                status_code=e.status_code,
+                detail=e.message
+            )
     else:
         return HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -74,10 +82,8 @@ def login(user_credentials: UserLogin, db: Session = Depends(get_db)):
         user = user_service.authenticate_user(user_credentials.email, user_credentials.password)
         
         if not user:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Incorrect email or password",
-                headers={"WWW-Authenticate": "Bearer"},
+            raise InvalidCredentialsException(
+                message="Email veya şifre hatalı"
             )
         
         if not user.is_active:
@@ -87,9 +93,8 @@ def login(user_credentials: UserLogin, db: Session = Depends(get_db)):
             )
         
         if not user.is_verified:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Please verify your email before logging in"
+            raise EmailNotVerifiedException(
+                message="Lütfen giriş yapmadan önce email adresinizi doğrulayın"
             )
         
         # Create access token

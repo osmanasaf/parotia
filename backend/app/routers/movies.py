@@ -47,25 +47,6 @@ def get_popular_movies(
     except Exception as e:
         raise handle_exception(e)
 
-@router.get("/{tmdb_id}")
-def get_movie_details(
-    tmdb_id: int,
-    db: Session = Depends(get_db)
-):
-    try:
-        movie_service = MovieService(db)
-        result = movie_service.get_movie_details(tmdb_id)
-        
-        if result["success"]:
-            return result
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Movie not found"
-            )
-    except Exception as e:
-        raise handle_exception(e)
-
 @router.get("/search")
 def search_movies(
     query: str = Query(..., description="Search query"),
@@ -82,6 +63,25 @@ def search_movies(
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=result["error"]
+            )
+    except Exception as e:
+        raise handle_exception(e)
+
+@router.get("/{tmdb_id}")
+def get_movie_details(
+    tmdb_id: int,
+    db: Session = Depends(get_db)
+):
+    try:
+        movie_service = MovieService(db)
+        result = movie_service.get_movie_details(tmdb_id)
+        
+        if result["success"]:
+            return result
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Movie not found"
             )
     except Exception as e:
         raise handle_exception(e)
