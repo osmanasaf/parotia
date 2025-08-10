@@ -32,4 +32,14 @@ class MovieService(MovieServiceInterface):
     
     def get_movie_watch_providers(self, movie_id: int) -> TMDBResponse:
         """Get movie watch providers by ID"""
-        return self.client.make_request(f"movie/{movie_id}/watch/providers") 
+        return self.client.make_request(f"movie/{movie_id}/watch/providers")
+    
+    def get_movie_genres(self) -> TMDBResponse:
+        """Get movie genres list from TMDB"""
+        return self.client.make_request("genre/movie/list")
+    
+    def discover_movies(self, page: int = 1, **filters) -> TMDBResponse:
+        """Discover movies with filters (genre, year, etc.)"""
+        params = {"page": page}
+        params.update(filters)
+        return self.client.make_request("discover/movie", params) 

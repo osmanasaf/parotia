@@ -7,6 +7,7 @@ from app.repositories.user_interaction_repository import (
 )
 from app.schemas.movie import (
     UserRatingCreate, UserRatingResponse, UserWatchlistCreate, UserWatchlistResponse,
+    UserWatchlistWithRatingResponse,
     EmotionBasedRecommendation, HistoryBasedRecommendation, HybridRecommendation
 )
 from app.core.exceptions import UserNotFoundException
@@ -141,6 +142,38 @@ class MovieService:
             return [UserWatchlistResponse.from_orm(item) for item in watchlist]
         except Exception as e:
             logger.error(f"Error getting user movie watchlist: {str(e)}")
+            raise
+
+    def get_user_movie_rating_for(self, user_id: int, tmdb_id: int) -> Optional[UserRatingResponse]:
+        """Get user's rating for a specific movie"""
+        try:
+            rating = self.rating_repo.get_user_rating(user_id, tmdb_id, "movie")
+            return UserRatingResponse.from_orm(rating) if rating else None
+        except Exception as e:
+            logger.error(f"Error getting user movie rating for {tmdb_id}: {str(e)}")
+            raise
+
+    def get_user_movie_watchlist_with_ratings(self, user_id: int, status: Optional[str] = None) -> List[UserWatchlistWithRatingResponse]:
+        """Get user's movie watchlist and enrich with user's rating if exists"""
+        try:
+            watchlist = self.watchlist_repo.get_user_watchlist(user_id, "movie", status)
+            enriched: List[UserWatchlistWithRatingResponse] = []
+            for item in watchlist:
+                rating = self.rating_repo.get_user_rating(user_id, item.tmdb_id, "movie")
+                enriched.append(UserWatchlistWithRatingResponse(
+                    id=item.id,
+                    user_id=item.user_id,
+                    tmdb_id=item.tmdb_id,
+                    content_type=item.content_type,
+                    status=item.status,
+                    added_at=item.added_at,
+                    updated_at=item.updated_at,
+                    user_rating=rating.rating if rating else None,
+                    user_comment=rating.comment if rating else None,
+                ))
+            return enriched
+        except Exception as e:
+            logger.error(f"Error getting user movie watchlist with ratings: {str(e)}")
             raise
     
     def update_movie_watchlist_status(self, user_id: int, tmdb_id: int, status: str) -> Optional[UserWatchlistResponse]:

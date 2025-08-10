@@ -16,6 +16,10 @@ from app.services.emotion_analysis_service import EmotionAnalysisService
 
 logger = logging.getLogger(__name__)
 
+# Performance/limit constants
+MAX_RECOMMENDATIONS = 10
+EMBEDDING_TOP_K = 40
+
 class RecommendationService:
     """Service for AI-based recommendation operations"""
     
@@ -63,7 +67,7 @@ class RecommendationService:
                 # Fallback to text-based search
                 recommendations = self.embedding_service.search_similar_content(
                     query_text=emotion_data.emotion,
-                    top_k=50,  # Daha fazla sonuç al
+                    top_k=EMBEDDING_TOP_K,
                     content_type=emotion_data.content_type
                 )
             else:
@@ -71,7 +75,7 @@ class RecommendationService:
                 emotion_embedding_array = np.array(emotion_embedding)
                 recommendations = self.embedding_service.search_similar_content(
                     query_text="",
-                    top_k=50,  # Daha fazla sonuç al
+                    top_k=EMBEDDING_TOP_K,
                     content_type=emotion_data.content_type,
                     query_embedding=emotion_embedding_array
                 )
@@ -132,8 +136,8 @@ class RecommendationService:
                             score=rec["similarity_score"]
                         )
                         
-                        # Stop when we have 10 recommendations
-                        if len(clean_recommendations) >= 10:
+                        # Early stop when enough items are collected
+                        if len(clean_recommendations) >= MAX_RECOMMENDATIONS:
                             break
                             
                 except Exception as e:
@@ -154,7 +158,97 @@ class RecommendationService:
             logger.error(f"Error getting emotion-based recommendations: {str(e)}")
             return {"success": False, "error": str(e)}
 
-    def get_hybrid_recommendations(self, user_id: int, emotion_text: str, content_type: str = "movie") -> Dict[str, Any]:
+    # ============================================================================
+    # KAMUYA AÇIK (AUTH GEREKTİRMEYEN) ÖNERİ METODLARI
+    # ============================================================================
+
+    def get_emotion_based_recommendations_public(self, emotion_text: str, content_type: str = "movie", exclude_tmdb_ids: Optional[set] = None) -> Dict[str, Any]:
+        """
+        Token gerektirmeyen, anlık duygu metnine göre öneriler.
+        - Kullanıcı geçmişine bakmaz, history kaydetmez.
+        - Temel temizleme ve TMDB detaylarıyla zenginleştirme yapar.
+        """
+        try:
+            # Get current emotion embedding
+            emotion_analysis = self.emotion_service.analyze_user_emotion(emotion_text)
+            emotion_embedding = emotion_analysis.get("emotion_embedding", [])
+
+            if emotion_embedding:
+                emotion_array = np.array(emotion_embedding)
+                recommendations = self.embedding_service.search_similar_content(
+                    query_text="",
+                    top_k=EMBEDDING_TOP_K,
+                    content_type=content_type,
+                    query_embedding=emotion_array
+                )
+            else:
+                # Fallback to text-based
+                recommendations = self.embedding_service.search_similar_content(
+                    query_text=emotion_text,
+                    top_k=EMBEDDING_TOP_K,
+                    content_type=content_type
+                )
+
+            seen_tmdb_ids = set()
+            exclude_ids = set(exclude_tmdb_ids or [])
+            clean_recommendations = []
+
+            for rec in recommendations:
+                tmdb_id = rec.get("tmdb_id")
+                if tmdb_id is None or tmdb_id in seen_tmdb_ids or tmdb_id in exclude_ids:
+                    continue
+                seen_tmdb_ids.add(tmdb_id)
+
+                try:
+                    if content_type == "movie":
+                        content_response = self.tmdb_movie_service.get_movie_details(tmdb_id)
+                    else:
+                        content_response = self.tmdb_tv_service.get_tv_show_details(tmdb_id)
+
+                    if not content_response.success:
+                        continue
+
+                    content_data = content_response.data
+                    vote_average = content_data.get("vote_average", 0)
+                    if vote_average < 6.0:
+                        continue
+
+                    clean_rec = {
+                        "tmdb_id": tmdb_id,
+                        "content_type": content_type,
+                        "title": content_data.get("title") or content_data.get("name") or rec.get("title", ""),
+                        "overview": content_data.get("overview", rec.get("overview", "")),
+                        "backdrop_path": content_data.get("backdrop_path"),
+                        "poster_path": content_data.get("poster_path"),
+                        "release_date": content_data.get("release_date") or content_data.get("first_air_date"),
+                        "vote_average": vote_average,
+                        "similarity_score": float(rec.get("similarity_score", 0.0)),
+                        "rank": len(clean_recommendations) + 1
+                    }
+                    clean_recommendations.append(clean_rec)
+
+                    if len(clean_recommendations) >= MAX_RECOMMENDATIONS:
+                        break
+
+                except Exception as inner_e:
+                    logger.warning(f"Public recommendations: error enriching {content_type} {tmdb_id}: {inner_e}")
+                    continue
+
+            return {
+                "success": True,
+                "data": {
+                    "recommendations": clean_recommendations,
+                    "emotion": emotion_text,
+                    "content_type": content_type,
+                    "total": len(clean_recommendations),
+                    "method": "emotion_public"
+                }
+            }
+        except Exception as e:
+            logger.error(f"Error getting public emotion-based recommendations: {str(e)}")
+            return {"success": False, "error": str(e)}
+
+    def get_hybrid_recommendations(self, user_id: int, emotion_text: str, content_type: str = "movie", exclude_tmdb_ids: Optional[set] = None) -> Dict[str, Any]:
         """
         Hibrit öneriler: %70-80 duygu durumu + %20-30 izleme geçmişi
         - Kullanıcının anlık duygu durumu ve geçmişini birleştirir
@@ -204,7 +298,7 @@ class RecommendationService:
                 # Search using hybrid embedding
                 recommendations = self.embedding_service.search_similar_content(
                     query_text="",
-                    top_k=50,  # Daha fazla sonuç al
+                    top_k=EMBEDDING_TOP_K,
                     content_type=content_type,
                     query_embedding=hybrid_embedding
                 )
@@ -214,7 +308,7 @@ class RecommendationService:
                     emotion_array = np.array(emotion_embedding)
                     recommendations = self.embedding_service.search_similar_content(
                         query_text="",
-                        top_k=50,  # Daha fazla sonuç al
+                        top_k=EMBEDDING_TOP_K,
                         content_type=content_type,
                         query_embedding=emotion_array
                     )
@@ -222,7 +316,7 @@ class RecommendationService:
                     # Final fallback to text-based search
                     recommendations = self.embedding_service.search_similar_content(
                         query_text=emotion_text,
-                        top_k=50,  # Daha fazla sonuç al
+                        top_k=EMBEDDING_TOP_K,
                         content_type=content_type
                     )
             
@@ -234,13 +328,14 @@ class RecommendationService:
             logger.info(f"User has {len(watched_tmdb_ids)} watched movies")
             
             seen_tmdb_ids = set()
+            exclude_ids = set(exclude_tmdb_ids or [])
             clean_recommendations = []
             
             for rec in recommendations:
                 tmdb_id = rec.get("tmdb_id")
                 
                 # Skip if already seen or watched
-                if tmdb_id in seen_tmdb_ids or tmdb_id in watched_tmdb_ids:
+                if tmdb_id is None or tmdb_id in seen_tmdb_ids or tmdb_id in watched_tmdb_ids or tmdb_id in exclude_ids:
                     logger.info(f"Hybrid: Skipping duplicate/watched movie {tmdb_id}")
                     continue
                 
@@ -286,8 +381,7 @@ class RecommendationService:
                             score=rec["similarity_score"]
                         )
                         
-                        # Stop when we have 10 recommendations
-                        if len(clean_recommendations) >= 10:
+                        if len(clean_recommendations) >= MAX_RECOMMENDATIONS:
                             break
                             
                 except Exception as e:
@@ -373,7 +467,7 @@ class RecommendationService:
             # Search for similar content using user embedding
             recommendations = self.embedding_service.search_similar_content(
                 query_text="",  # Not used when user_embedding is provided
-                top_k=20,
+                top_k=EMBEDDING_TOP_K,
                 content_type=history_data.content_type,
                 user_embedding=user_embedding
             )
@@ -433,8 +527,7 @@ class RecommendationService:
                             score=rec["similarity_score"]
                         )
                         
-                        # Stop when we have 10 recommendations
-                        if len(clean_recommendations) >= 10:
+                        if len(clean_recommendations) >= MAX_RECOMMENDATIONS:
                             break
                             
                 except Exception as e:
@@ -485,7 +578,7 @@ class RecommendationService:
             user_embedding = user_profile["emotional_embedding"]
             recommendations = self.embedding_service.search_similar_content(
                 query_text="",
-                top_k=50,  # Get more to filter out watched content
+                top_k=EMBEDDING_TOP_K,
                 content_type=content_type,
                 user_embedding=user_embedding
             )
@@ -547,8 +640,7 @@ class RecommendationService:
                             score=rec["similarity_score"]
                         )
                         
-                        # Stop when we have 10 recommendations
-                        if len(clean_recommendations) >= 10:
+                        if len(clean_recommendations) >= MAX_RECOMMENDATIONS:
                             break
                             
                 except Exception as e:

@@ -40,4 +40,14 @@ class TVService(TVServiceInterface):
     
     def get_tv_watch_providers(self, tv_id: int) -> TMDBResponse:
         """Get TV show watch providers by ID"""
-        return self.client.make_request(f"tv/{tv_id}/watch/providers") 
+        return self.client.make_request(f"tv/{tv_id}/watch/providers")
+    
+    def get_tv_genres(self) -> TMDBResponse:
+        """Get TV genres list from TMDB"""
+        return self.client.make_request("genre/tv/list")
+    
+    def discover_tv_shows(self, page: int = 1, **filters) -> TMDBResponse:
+        """Discover TV shows with filters (genre, year, etc.)"""
+        params = {"page": page}
+        params.update(filters)
+        return self.client.make_request("discover/tv", params) 

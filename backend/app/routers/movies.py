@@ -7,11 +7,12 @@ from app.db import get_db  # app.core.database yerine app.db
 from app.core.exceptions import BaseAppException
 from app.services.movie_service import MovieService
 from app.schemas.movie import (
-    UserRatingCreate, UserRatingResponse, UserWatchlistCreate, UserWatchlistResponse
+    UserRatingCreate, UserRatingResponse, UserWatchlistCreate, UserWatchlistResponse, UserWatchlistWithRatingResponse
 )
 from datetime import datetime
 from app.models.user_interaction import UserWatchlist
 from app.services.emotion_analysis_service import EmotionAnalysisService
+from app.services.recommendation_service import RecommendationService
 
 router = APIRouter(prefix="/movies", tags=["movies"])
 
@@ -86,6 +87,77 @@ def get_movie_details(
     except Exception as e:
         raise handle_exception(e)
 
+@router.get("/details-with-similar/{tmdb_id}")
+def get_movie_details_with_similar(
+    tmdb_id: int,
+    db: Session = Depends(get_db),
+    current_user_id: int = Depends(get_current_user)
+):
+    """Detay + similar içerikler (token varsa hibrit, yoksa emotion public)."""
+    try:
+        # 1) Detay
+        movie_service = MovieService(db)
+        detail_result = movie_service.get_movie_details(tmdb_id)
+        if not detail_result["success"]:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Movie not found")
+
+        detail = detail_result["data"]
+        overview_text = detail.get("overview", "")
+
+        # 2) Similar (token var: hybrid; yoksa public emotion)
+        rec_service = RecommendationService(db)
+        # Similar set içinde aynı içerik (tmdb_id) yer almamalı
+        similar = rec_service.get_hybrid_recommendations(
+            current_user_id,
+            overview_text,
+            content_type="movie",
+            exclude_tmdb_ids={tmdb_id}
+        )
+
+        return {
+            "success": True,
+            "data": {
+                "detail": detail,
+                "similar": similar.get("data", {}).get("recommendations", [])
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise handle_exception(e)
+
+@router.get("/details-with-similar-public/{tmdb_id}")
+def get_movie_details_with_similar_public(
+    tmdb_id: int,
+    db: Session = Depends(get_db)
+):
+    """Detay + similar içerikler (public: token yok)."""
+    try:
+        movie_service = MovieService(db)
+        detail_result = movie_service.get_movie_details(tmdb_id)
+        if not detail_result["success"]:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Movie not found")
+
+        detail = detail_result["data"]
+        overview_text = detail.get("overview", "")
+
+        rec_service = RecommendationService(db)
+        similar = rec_service.get_emotion_based_recommendations_public(
+            overview_text, content_type="movie", exclude_tmdb_ids={tmdb_id}
+        )
+
+        return {
+            "success": True,
+            "data": {
+                "detail": detail,
+                "similar": similar.get("data", {}).get("recommendations", [])
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise handle_exception(e)
+
 @router.get("/{tmdb_id}/watch-providers")
 def get_movie_watch_providers(
     tmdb_id: int,
@@ -136,15 +208,8 @@ def get_my_movie_ratings(
 ):
     try:
         movie_service = MovieService(db)
-        result = movie_service.get_user_ratings(current_user_id)
-        
-        if result["success"]:
-            return result["data"]
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=result["error"]
-            )
+        result = movie_service.get_user_movie_ratings(current_user_id)
+        return result
     except Exception as e:
         raise handle_exception(e)
 
@@ -157,19 +222,12 @@ def add_movie_to_watchlist(
 ):
     try:
         movie_service = MovieService(db)
-        result = movie_service.add_to_watchlist(current_user_id, watchlist_data)
-        
-        if result["success"]:
-            return result["data"]
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=result["error"]
-            )
+        result = movie_service.add_movie_to_watchlist(current_user_id, watchlist_data)
+        return result
     except Exception as e:
         raise handle_exception(e)
 
-@router.get("/my/watchlist", response_model=List[UserWatchlistResponse])
+@router.get("/my/watchlist", response_model=List[UserWatchlistWithRatingResponse])
 def get_my_movie_watchlist(
     status: Optional[str] = Query(None, description="Filter by status ('to_watch', 'watching', 'completed')"),
     current_user_id: int = Depends(get_current_user),
@@ -177,17 +235,13 @@ def get_my_movie_watchlist(
 ):
     try:
         movie_service = MovieService(db)
-        result = movie_service.get_user_watchlist(current_user_id, status)
-        
-        if result["success"]:
-            return result["data"]
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=result["error"]
-            )
+        enriched = movie_service.get_user_movie_watchlist_with_ratings(current_user_id, status)
+        return enriched
     except Exception as e:
         raise handle_exception(e)
+
+# Not: Rating tekil sorgu ve watchlist-with-ratings endpointleri kaldırıldı; 
+# mevcut /my/watchlist artık rating bilgisini de döndürüyor.
 
 @router.put("/watchlist/{tmdb_id}")
 def update_movie_watchlist_status(

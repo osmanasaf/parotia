@@ -6,8 +6,9 @@ from app.core.auth import get_current_user
 from app.core.exceptions import BaseAppException
 from app.services.tv_service import TVService
 from app.schemas.movie import (
-    UserRatingCreate, UserRatingResponse, UserWatchlistCreate, UserWatchlistResponse
+    UserRatingCreate, UserRatingResponse, UserWatchlistCreate, UserWatchlistResponse, UserWatchlistWithRatingResponse
 )
+from app.services.recommendation_service import RecommendationService
 
 router = APIRouter(prefix="/tv", tags=["tv"])
 
@@ -62,6 +63,74 @@ def get_tv_show_details(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="TV show not found"
             )
+    except Exception as e:
+        raise handle_exception(e)
+
+@router.get("/details-with-similar/{tmdb_id}")
+def get_tv_details_with_similar(
+    tmdb_id: int,
+    db: Session = Depends(get_db),
+    current_user_id: int = Depends(get_current_user)
+):
+    """Detay + similar içerikler (token varsa hibrit, yoksa public için ayrı endpoint)."""
+    try:
+        tv_service = TVService(db)
+        detail_result = tv_service.get_tv_show_details(tmdb_id)
+        if not detail_result["success"]:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="TV show not found")
+
+        detail = detail_result["data"]
+        overview_text = detail.get("overview", "")
+
+        rec_service = RecommendationService(db)
+        similar = rec_service.get_hybrid_recommendations(
+            current_user_id,
+            overview_text,
+            content_type="tv",
+            exclude_tmdb_ids={tmdb_id}
+        )
+
+        return {
+            "success": True,
+            "data": {
+                "detail": detail,
+                "similar": similar.get("data", {}).get("recommendations", [])
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise handle_exception(e)
+
+@router.get("/details-with-similar-public/{tmdb_id}")
+def get_tv_details_with_similar_public(
+    tmdb_id: int,
+    db: Session = Depends(get_db)
+):
+    """Detay + similar içerikler (public: token yok)."""
+    try:
+        tv_service = TVService(db)
+        detail_result = tv_service.get_tv_show_details(tmdb_id)
+        if not detail_result["success"]:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="TV show not found")
+
+        detail = detail_result["data"]
+        overview_text = detail.get("overview", "")
+
+        rec_service = RecommendationService(db)
+        similar = rec_service.get_emotion_based_recommendations_public(
+            overview_text, content_type="tv", exclude_tmdb_ids={tmdb_id}
+        )
+
+        return {
+            "success": True,
+            "data": {
+                "detail": detail,
+                "similar": similar.get("data", {}).get("recommendations", [])
+            }
+        }
+    except HTTPException:
+        raise
     except Exception as e:
         raise handle_exception(e)
 
@@ -129,7 +198,7 @@ def add_tv_show_to_watchlist(
     except Exception as e:
         raise handle_exception(e)
 
-@router.get("/my/watchlist", response_model=List[UserWatchlistResponse])
+@router.get("/my/watchlist", response_model=List[UserWatchlistWithRatingResponse])
 def get_my_tv_watchlist(
     status: Optional[str] = Query(None, description="Filter by status ('to_watch', 'watching', 'completed')"),
     current_user_id: int = Depends(get_current_user),
@@ -138,10 +207,13 @@ def get_my_tv_watchlist(
     """Get current user's TV show watchlist"""
     try:
         tv_service = TVService(db)
-        watchlist = tv_service.get_user_tv_watchlist(current_user_id, status)
-        return watchlist
+        enriched = tv_service.get_user_tv_watchlist_with_ratings(current_user_id, status)
+        return enriched
     except Exception as e:
         raise handle_exception(e)
+
+# Not: Rating tekil sorgu ve watchlist-with-ratings endpointleri kaldırıldı; 
+# mevcut /my/watchlist artık rating bilgisini de döndürüyor.
 
 @router.put("/watchlist/{tmdb_id}")
 def update_tv_watchlist_status(

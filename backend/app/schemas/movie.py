@@ -81,6 +81,21 @@ class UserWatchlistResponse(BaseModel):
     class Config:
         from_attributes = True
 
+class UserWatchlistWithRatingResponse(BaseModel):
+    """User watchlist item enriched with user's rating if exists"""
+    id: int
+    user_id: int
+    tmdb_id: int
+    content_type: str
+    status: str
+    added_at: datetime
+    updated_at: Optional[datetime] = None
+    user_rating: Optional[int] = None
+    user_comment: Optional[str] = None
+    
+    class Config:
+        from_attributes = True
+
 # Recommendation Schemas
 class EmotionBasedRecommendation(BaseModel):
     """Emotion-based recommendation request"""

@@ -56,9 +56,7 @@ def get_history_based_recommendations(
 
 @router.post("/current-emotion")
 def get_current_emotion_recommendations(
-    emotion_text: str = Query(..., description="Kullanıcının anlık duygu durumu"),
-    content_type: str = Query("movie", description="İçerik türü: 'movie', 'tv', 'all'"),
-    current_user_id: int = Depends(get_current_user),
+    payload: EmotionBasedRecommendation,
     db: Session = Depends(get_db)
 ):
     """
@@ -68,21 +66,17 @@ def get_current_emotion_recommendations(
     """
     try:
         recommendation_service = RecommendationService(db)
-        result = recommendation_service.get_emotion_based_recommendations(
-            current_user_id, 
-            EmotionBasedRecommendation(
-                emotion=emotion_text,
-                content_type=content_type,
-                page=1
-            )
+        result = recommendation_service.get_emotion_based_recommendations_public(
+            emotion_text=payload.emotion,
+            content_type=payload.content_type
         )
         
-        if result["success"]:
+        if result.get("success"):
             return result
         else:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=result["error"]
+                detail=result.get("error", "Failed to get recommendations")
             )
     except Exception as e:
         raise handle_exception(e)
