@@ -19,8 +19,10 @@ ENV INDEX_DIR=/data \
 # Create index dir
 RUN mkdir -p /data
 
-WORKDIR /app
+WORKDIR /app/backend
 
-CMD ["sh", "-c", "uvicorn backend.app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+ENV PYTHONUNBUFFERED=1
+
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
 
 
