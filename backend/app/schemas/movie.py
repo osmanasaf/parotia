@@ -118,6 +118,7 @@ class HybridRecommendationRequest(BaseModel):
     """Hybrid recommendation request with emotion text in body"""
     emotion_text: str = Field(..., description="User's emotional state text")
     content_type: str = Field("movie", description="Content type: 'movie', 'tv', or 'all'")
+    page: int = Field(1, ge=1, description="Page number (1-4)")
 
 class RecommendationResponse(BaseModel):
     """Recommendation response with TMDB data"""

@@ -1,0 +1,13 @@
+.git
+.gitignore
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+.env
+venv
+node_modules
+*.log
+embeddings_cache.pkl
+faiss_index.bin
+/data
+

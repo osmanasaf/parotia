@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from app.db import get_db
-from app.schemas.user import UserCreate, UserLogin, UserResponse, Token
+from app.schemas.user import UserCreate, UserLogin, UserResponse, Token, UserUpdate, PasswordChange, EmailChangeRequest, EmailChangeConfirm, PasswordResetRequest, PasswordResetConfirm, UserNameUpdate
 from app.services.user_service import UserService
 from app.core.auth import create_access_token, get_current_user
 from app.core.exceptions import BaseAppException, EmailNotVerifiedException, InvalidCredentialsException
@@ -126,3 +126,79 @@ def get_current_user_info(current_user_id: int = Depends(get_current_user), db: 
         
     except Exception as e:
         raise handle_exception(e) 
+
+@router.put("/me", response_model=UserResponse)
+def update_current_user(
+    update_data: UserNameUpdate,
+    current_user_id: int = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Update current user's name fields (first_name, last_name)"""
+    try:
+        user_service = UserService(db)
+        updated_user = user_service.update_user_name(current_user_id, update_data)
+        return updated_user
+    except Exception as e:
+        raise handle_exception(e)
+
+@router.post("/change-password")
+def change_password(
+    payload: PasswordChange,
+    current_user_id: int = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Change current user's password"""
+    try:
+        user_service = UserService(db)
+        user_service.change_password(current_user_id, payload.current_password, payload.new_password)
+        return {"message": "Şifre başarıyla güncellendi"}
+    except Exception as e:
+        raise handle_exception(e)
+
+@router.post("/request-email-change")
+def request_email_change(
+    payload: EmailChangeRequest,
+    current_user_id: int = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """İki aşamalı email değişimi: 1) yeni emaile kod gönder"""
+    try:
+        user_service = UserService(db)
+        user_service.request_email_change(current_user_id, payload.new_email)
+        return {"message": "Doğrulama kodu yeni e‑posta adresine gönderildi"}
+    except Exception as e:
+        raise handle_exception(e)
+
+@router.post("/confirm-email-change", response_model=UserResponse)
+def confirm_email_change(
+    payload: EmailChangeConfirm,
+    current_user_id: int = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """İki aşamalı email değişimi: 2) kodu doğrula ve email’i kalıcı olarak güncelle"""
+    try:
+        user_service = UserService(db)
+        updated = user_service.confirm_email_change(current_user_id, payload.new_email, payload.code)
+        return updated
+    except Exception as e:
+        raise handle_exception(e)
+
+@router.post("/request-password-reset")
+def request_password_reset(payload: PasswordResetRequest, db: Session = Depends(get_db)):
+    """Şifre sıfırlama kodu gönder"""
+    try:
+        user_service = UserService(db)
+        user_service.request_password_reset(payload.email)
+        return {"message": "Şifre sıfırlama kodu email adresinize gönderildi"}
+    except Exception as e:
+        raise handle_exception(e)
+
+@router.post("/confirm-password-reset")
+def confirm_password_reset(payload: PasswordResetConfirm, db: Session = Depends(get_db)):
+    """Kodu doğrula ve yeni şifreyi ayarla"""
+    try:
+        user_service = UserService(db)
+        user_service.confirm_password_reset(payload.email, payload.code, payload.new_password)
+        return {"message": "Şifreniz başarıyla sıfırlandı"}
+    except Exception as e:
+        raise handle_exception(e)

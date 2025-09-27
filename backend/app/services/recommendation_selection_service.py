@@ -11,7 +11,7 @@ from app.services.emotion_analysis_service import EmotionAnalysisService
 logger = logging.getLogger(__name__)
 
 class RecommendationSelectionService:
-    """Service for managing recommendation selections and notifications"""
+    """Service for managing recommendation selections (notification kaldırıldı)"""
     
     def __init__(self, db: Session):
         self.db = db
@@ -34,9 +34,7 @@ class RecommendationSelectionService:
                 recommendation_type=recommendation_type,
                 source=source,
                 recommendation_score=recommendation_score,
-                selected_rank=selected_rank,
-                notification_scheduled=True,
-                notification_scheduled_at=datetime.utcnow()
+                selected_rank=selected_rank
             )
             
             self.db.add(selection)
@@ -79,63 +77,9 @@ class RecommendationSelectionService:
             self.db.rollback()
             return {"success": False, "error": str(e)}
     
-    def get_pending_notifications(self) -> list:
-        """Get recommendations that need notifications (24 hours after selection)"""
-        try:
-            # Get selections from 24 hours ago that haven't been notified
-            cutoff_time = datetime.utcnow() - timedelta(hours=24)
-            
-            pending_selections = self.db.query(RecommendationSelection).filter(
-                and_(
-                    RecommendationSelection.notification_scheduled == True,
-                    RecommendationSelection.notification_sent == False,
-                    RecommendationSelection.created_at <= cutoff_time,
-                    RecommendationSelection.feedback_provided == False  # Don't notify if already provided feedback
-                )
-            ).all()
-            
-            return pending_selections
-            
-        except Exception as e:
-            logger.error(f"Error getting pending notifications: {str(e)}")
-            return []
+    # Notification akışı kaldırıldı
     
-    def send_notification(self, selection_id: int) -> Dict[str, Any]:
-        """Send notification for a recommendation selection based on source"""
-        try:
-            selection = self.db.query(RecommendationSelection).filter(
-                RecommendationSelection.id == selection_id
-            ).first()
-            
-            if not selection:
-                return {"success": False, "error": "Selection not found"}
-            
-            # Determine notification type based on source
-            notification_type = "email" if selection.source == "web" else "mobile_push"
-            
-            # Mark as notified
-            selection.notification_sent = True
-            selection.notification_sent_at = datetime.utcnow()
-            selection.feedback_requested = True
-            selection.feedback_requested_at = datetime.utcnow()
-            
-            self.db.commit()
-            
-            logger.info(f"Notification sent for selection {selection_id} via {notification_type}")
-            
-            return {
-                "success": True,
-                "selection_id": selection_id,
-                "user_id": selection.user_id,
-                "tmdb_id": selection.tmdb_id,
-                "notification_type": notification_type,
-                "source": selection.source,
-                "message": f"Film hakkında ne düşünüyorsunuz? {selection.recommendation_type} önerimizi değerlendirin."
-            }
-            
-        except Exception as e:
-            logger.error(f"Error sending notification: {str(e)}")
-            return {"success": False, "error": str(e)}
+    # Notification akışı kaldırıldı
     
     def mark_as_watched(self, user_id: int, tmdb_id: int, content_type: str) -> bool:
         """Mark a selected recommendation as watched"""

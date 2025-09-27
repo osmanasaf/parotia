@@ -6,7 +6,6 @@ from app.core.auth import get_current_user
 from app.db import get_db
 from app.models.user import User
 from app.services.emotion_analysis_service import EmotionAnalysisService
-from app.services.notification_service import NotificationService
 from app.schemas.movie import EmotionInsightsResponse
 
 router = APIRouter(prefix="/emotion", tags=["Emotion Analysis & Feedback"])
@@ -183,25 +182,7 @@ async def get_emotion_insights(
             detail=f"Error getting emotion insights: {str(e)}"
         )
 
-@router.get("/statistics")
-async def get_emotion_statistics(
-    current_user_id: int = Depends(get_current_user),
-    db: Session = Depends(get_db)
-) -> Dict[str, Any]:
-    """Get emotion analysis statistics"""
-    try:
-        notification_service = NotificationService(db)
-        stats = notification_service.get_notification_statistics()
-        
-        return {
-            "success": True,
-            "data": stats
-        }
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error getting emotion statistics: {str(e)}"
-        )
+# Öneri sonrası bildirim istatistik endpointi kaldırıldı
 
 @router.post("/profile/update")
 async def update_emotion_profile(

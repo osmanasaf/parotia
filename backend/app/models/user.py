@@ -8,6 +8,8 @@ class User(Base):
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String, unique=True, index=True, nullable=False)
     username = Column(String, unique=True, index=True, nullable=False)
+    first_name = Column(String, nullable=True)
+    last_name = Column(String, nullable=True)
     hashed_password = Column(String, nullable=False)
     is_active = Column(Boolean, default=True)
     is_verified = Column(Boolean, default=False)
@@ -28,4 +30,7 @@ class EmailVerification(Base):
     verification_code = Column(String(6), nullable=False)  # 6 haneli kod
     expires_at = Column(DateTime(timezone=True), nullable=False)
     is_used = Column(Boolean, default=False)
+    # Yeni alanlar: e-posta değişimi için hedef email ve amaç bilgisi
+    target_email = Column(String, nullable=True)
+    purpose = Column(String, nullable=False, default="verify_email")  # verify_email | email_change
     created_at = Column(DateTime(timezone=True), server_default=func.now()) 

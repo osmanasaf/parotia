@@ -54,9 +54,135 @@ def get_history_based_recommendations(
     except Exception as e:
         raise handle_exception(e)
 
+# ============================================================================
+# ADMIN - Güncel içerik populate (scheduled kullanım için)
+# ============================================================================
+
+@router.post("/admin/embedding/populate-recent")
+def populate_recent_content(
+    content_type: str = Query("movie", description="İçerik türü: 'movie' veya 'tv'"),
+    days: int = Query(1, ge=1, le=14, description="Kaç gün geriden başlasın (UTC)"),
+    pages: int = Query(3, ge=1, le=20, description="TMDB discover sayfa sayısı"),
+    use_details: bool = Query(False, description="Detay çekerek daha zengin embedding"),
+    db: Session = Depends(get_db)
+):
+    """Son X günde eklenen/başlayan içerikleri FAISS indeksine ekle.
+
+    Not: Rate limit güvenliği için pages üst limiti konservatif tutuldu.
+    Cron/scheduled çağrılar için uygundur.
+    """
+    try:
+        recommendation_service = RecommendationService(db)
+        result = recommendation_service.populate_recent_content(
+            content_type=content_type,
+            days=days,
+            pages=pages,
+            use_details=use_details
+        )
+        if result.get("success"):
+            return result
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=result.get("error", "populate_recent_content failed")
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error populating recent content: {str(e)}"
+        )
+
+@router.post("/admin/embedding/bulk-popular")
+def bulk_populate_popular(
+    content_type: str = Query("movie", description="İçerik türü: 'movie' veya 'tv'"),
+    start_page: int = Query(1, ge=1, le=500, description="Başlangıç sayfası"),
+    end_page: int = Query(100, ge=1, le=500, description="Bitiş sayfası"),
+    use_details: bool = Query(False, description="Detay çekerek daha zengin embedding"),
+    db: Session = Depends(get_db)
+):
+    """'Popular' akışını sayfa aralığı ile toplu populate eder."""
+    try:
+        if end_page < start_page:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="end_page start_page'den küçük olamaz")
+        recommendation_service = RecommendationService(db)
+        result = recommendation_service.bulk_populate_popular(
+            content_type=content_type,
+            start_page=start_page,
+            end_page=end_page,
+            use_details=use_details
+        )
+        if result.get("success"):
+            return result
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=result.get("error", "bulk_populate_popular failed")
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error in bulk_popular: {str(e)}"
+        )
+
+@router.post("/admin/embedding/bulk-year")
+def bulk_populate_by_year(
+    content_type: str = Query("movie", description="İçerik türü: 'movie' veya 'tv'"),
+    year: int = Query(2020, ge=1900, le=2100, description="Yıl"),
+    pages: int = Query(100, ge=1, le=500, description="Sayfa sayısı"),
+    use_details: bool = Query(False, description="Detay çekerek daha zengin embedding"),
+    db: Session = Depends(get_db)
+):
+    """Belirli yıl için discover ile toplu populate eder."""
+    try:
+        recommendation_service = RecommendationService(db)
+        result = recommendation_service.bulk_populate_by_year(
+            content_type=content_type,
+            year=year,
+            pages=pages,
+            use_details=use_details
+        )
+        if result.get("success"):
+            return result
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=result.get("error", "bulk_populate_by_year failed")
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error in bulk_year: {str(e)}"
+        )
+
+@router.post("/admin/embedding/bulk-popular/continue")
+def continue_bulk_popular(
+    content_type: str = Query("movie", description="İçerik türü: 'movie' veya 'tv'"),
+    batch_pages: int = Query(25, ge=1, le=100, description="Bugün işlenecek sayfa sayısı"),
+    use_details: bool = Query(False, description="Detay çekerek daha zengin embedding"),
+    db: Session = Depends(get_db)
+):
+    """Dün kaldığı sayfadan itibaren 'popular' ingest'e devam eder (Redis ile)."""
+    try:
+        recommendation_service = RecommendationService(db)
+        result = recommendation_service.continue_bulk_popular(
+            content_type=content_type,
+            batch_pages=batch_pages,
+            use_details=use_details
+        )
+        if result.get("success"):
+            return result
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=result.get("error", "continue_bulk_popular failed")
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error in continue_bulk_popular: {str(e)}"
+        )
 @router.post("/current-emotion")
 def get_current_emotion_recommendations(
     payload: EmotionBasedRecommendation,
+    page: int = Query(1, ge=1, le=4, description="Page number (1-4)"),
     db: Session = Depends(get_db)
 ):
     """
@@ -68,7 +194,8 @@ def get_current_emotion_recommendations(
         recommendation_service = RecommendationService(db)
         result = recommendation_service.get_emotion_based_recommendations_public(
             emotion_text=payload.emotion,
-            content_type=payload.content_type
+            content_type=payload.content_type,
+            page=page
         )
         
         if result.get("success"):
@@ -84,6 +211,7 @@ def get_current_emotion_recommendations(
 @router.post("/hybrid")
 def get_hybrid_recommendations(
     request: HybridRecommendationRequest,
+    page: int = Query(1, ge=1, le=4, description="Page number (1-4)"),
     current_user_id: int = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -94,6 +222,8 @@ def get_hybrid_recommendations(
     """
     try:
         recommendation_service = RecommendationService(db)
+        # Servise page bilgisini iletmek için geçici alan set ediliyor
+        recommendation_service._page = page
         result = recommendation_service.get_hybrid_recommendations(
             current_user_id, 
             request.emotion_text, 
@@ -164,7 +294,7 @@ def get_my_recommendation_history(
 @router.post("/admin/embedding/populate")
 def populate_embedding_index(
     content_type: str = Query("movie", description="İçerik türü: 'movie' veya 'tv'"),
-    pages: int = Query(5, ge=1, le=20, description="Doldurulacak sayfa sayısı"),
+    pages: int = Query(5, ge=1, le=500, description="Doldurulacak sayfa sayısı"),
     db: Session = Depends(get_db)
 ):
     """Embedding index'ini popüler içerikle doldur (Admin)"""
@@ -185,7 +315,7 @@ def populate_embedding_index(
 @router.post("/admin/embedding/populate-detailed")
 def populate_embedding_index_detailed(
     content_type: str = Query("movie", description="İçerik türü: 'movie' veya 'tv'"),
-    pages: int = Query(3, ge=1, le=10, description="Doldurulacak sayfa sayısı (detaylı daha uzun sürer)"),
+    pages: int = Query(3, ge=1, le=100, description="Doldurulacak sayfa sayısı (detaylı daha uzun sürer)"),
     db: Session = Depends(get_db)
 ):
     """Embedding index'ini detaylı içerik bilgileriyle doldur (Admin)"""
@@ -490,69 +620,4 @@ async def provide_selection_feedback(
             detail=f"Error providing feedback: {str(e)}"
         ) 
 
-@router.post("/admin/send-notifications")
-async def send_pending_notifications(
-    current_user_id: int = Depends(get_current_user),
-    db: Session = Depends(get_db)
-) -> Dict[str, Any]:
-    """Admin endpoint to send pending notifications (24 hours after selection)"""
-    try:
-        from app.services.recommendation_selection_service import RecommendationSelectionService
-        
-        selection_service = RecommendationSelectionService(db)
-        pending_selections = selection_service.get_pending_notifications()
-        
-        sent_count = 0
-        notifications_sent = []
-        for selection in pending_selections:
-            result = selection_service.send_notification(selection.id)
-            if result["success"]:
-                sent_count += 1
-                notifications_sent.append(result)
-        
-        return {
-            "success": True,
-            "message": f"{sent_count} notification gönderildi",
-            "data": {
-                "pending_count": len(pending_selections),
-                "sent_count": sent_count,
-                "notifications": notifications_sent
-            }
-        }
-        
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error sending notifications: {str(e)}"
-        ) 
-
-@router.post("/admin/test-notification/{selection_id}")
-async def test_notification(
-    selection_id: int,
-    current_user_id: int = Depends(get_current_user),
-    db: Session = Depends(get_db)
-) -> Dict[str, Any]:
-    """Test endpoint - direkt selection ID ile notification gönder"""
-    try:
-        from app.services.recommendation_selection_service import RecommendationSelectionService
-        
-        selection_service = RecommendationSelectionService(db)
-        result = selection_service.send_notification(selection_id)
-        
-        if result["success"]:
-            return {
-                "success": True,
-                "message": "Test notification sent successfully",
-                "data": result
-            }
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=result["error"]
-            )
-            
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error sending test notification: {str(e)}"
-        ) 
+# Öneri sonrası bildirim endpointleri kaldırıldı

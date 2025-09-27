@@ -13,5 +13,6 @@ sentence-transformers
 scikit-learn
 numpy
 faiss-cpu
-redis 
+redis
 apscheduler
+

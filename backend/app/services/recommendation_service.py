@@ -1,6 +1,8 @@
 import logging
+from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 from typing import List, Optional, Dict, Any
+from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from app.core.tmdb_service import TMDBServiceFactory
 from app.repositories.user_interaction_repository import (
@@ -13,12 +15,18 @@ from app.core.exceptions import UserNotFoundException
 from app.core.config import get_settings
 from app.services.embedding_service import EmbeddingService
 from app.services.emotion_analysis_service import EmotionAnalysisService
+from app.core.cache import CacheService
 
 logger = logging.getLogger(__name__)
 
 # Performance/limit constants
-MAX_RECOMMENDATIONS = 10
-EMBEDDING_TOP_K = 40
+# 4 sayfa x 9 = 36
+PAGE_SIZE = 9
+MAX_PAGES = 4
+MAX_RECOMMENDATIONS = PAGE_SIZE * MAX_PAGES  # 36
+EMBEDDING_TOP_K = 80
+MIN_VOTE_AVERAGE = 6.0
+DETAILS_FETCH_CHUNK = PAGE_SIZE * 2
 
 class RecommendationService:
     """Service for AI-based recommendation operations"""
@@ -26,6 +34,7 @@ class RecommendationService:
     def __init__(self, db: Session):
         self.db = db
         self.settings = get_settings()
+        self.cache = CacheService()
         
         # Initialize repositories
         self.rating_repo = UserRatingRepository(db)
@@ -43,106 +52,172 @@ class RecommendationService:
         self.embedding_service = EmbeddingService()
         self.emotion_service = EmotionAnalysisService(db)
 
+    # =========================================================================
+    # YARDIMCI / ORTAK METODLAR (DRY & Performans)
+    # =========================================================================
+
+    def _get_emotion_embedding(self, text: str) -> Optional[np.ndarray]:
+        analysis = self.emotion_service.analyze_user_emotion(text)
+        embedding = analysis.get("emotion_embedding", [])
+        if embedding:
+            try:
+                return np.array(embedding)
+            except Exception:
+                return None
+        return None
+
+    def _search_by_emotion_or_text(self, content_type: str, emotion_embedding: Optional[np.ndarray], text: str):
+        if emotion_embedding is not None:
+            return self.embedding_service.search_similar_content(
+                query_text="",
+                top_k=EMBEDDING_TOP_K,
+                content_type=content_type,
+                query_embedding=emotion_embedding,
+            )
+        return self.embedding_service.search_similar_content(
+            query_text=text,
+            top_k=EMBEDDING_TOP_K,
+            content_type=content_type,
+        )
+
+    def _fetch_details(self, content_type: str, tmdb_id: int) -> Optional[Dict[str, Any]]:
+        if content_type == "movie":
+            resp = self.tmdb_movie_service.get_movie_details(tmdb_id)
+        else:
+            resp = self.tmdb_tv_service.get_tv_show_details(tmdb_id)
+        if not resp or not resp.success:
+            return None
+        return resp.data
+
+    def _build_clean_rec(self, tmdb_id: int, content_type: str, content_data: Dict[str, Any], similarity_score: float, current_len: int) -> Dict[str, Any]:
+        return {
+            "tmdb_id": tmdb_id,
+            "content_type": content_type,
+            "title": content_data.get("title") or content_data.get("name") or "",
+            "overview": content_data.get("overview", ""),
+            "backdrop_path": content_data.get("backdrop_path"),
+            "poster_path": content_data.get("poster_path"),
+            "release_date": content_data.get("release_date") or content_data.get("first_air_date"),
+            "vote_average": content_data.get("vote_average", 0),
+            "similarity_score": float(similarity_score),
+            "rank": current_len + 1,
+        }
+
+    def _stable_page_enrich_single(self, candidate_ids: list, page: int, content_type: str, *, save_params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        page = min(max(page, 1), MAX_PAGES)
+        start = (page - 1) * PAGE_SIZE
+        clean: List[Dict[str, Any]] = []
+        i = start
+        while i < len(candidate_ids) and len(clean) < PAGE_SIZE:
+            end = min(i + DETAILS_FETCH_CHUNK, len(candidate_ids))
+
+            def _job(idx: int):
+                tmdb_id, sim_score = candidate_ids[idx]
+                data = self._fetch_details(content_type, tmdb_id)
+                if not data:
+                    return idx, None, None, None
+                if data.get("vote_average", 0) < MIN_VOTE_AVERAGE:
+                    return idx, None, None, None
+                return idx, tmdb_id, sim_score, data
+
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                results = list(pool.map(_job, range(i, end)))
+
+            for idx, tmdb_id, sim_score, data in sorted(results, key=lambda x: x[0]):
+                if data is None:
+                    continue
+                clean_rec = self._build_clean_rec(tmdb_id, content_type, data, sim_score, len(clean))
+                clean.append(clean_rec)
+                if save_params:
+                    try:
+                        self.recommendation_repo.save_recommendation(
+                            user_id=save_params["user_id"],
+                            tmdb_id=tmdb_id,
+                            content_type=content_type,
+                            recommendation_type=save_params.get("recommendation_type"),
+                            emotion_state=save_params.get("emotion_state"),
+                            score=sim_score,
+                        )
+                    except Exception:
+                        pass
+                if len(clean) >= PAGE_SIZE:
+                    break
+
+            i = end
+        return clean
+
+    def _stable_page_enrich_mixed(self, candidate_ids: list, page: int) -> List[Dict[str, Any]]:
+        page = min(max(page, 1), MAX_PAGES)
+        start = (page - 1) * PAGE_SIZE
+        clean: List[Dict[str, Any]] = []
+        i = start
+        while i < len(candidate_ids) and len(clean) < PAGE_SIZE:
+            end = min(i + DETAILS_FETCH_CHUNK, len(candidate_ids))
+
+            def _job(idx: int):
+                tmdb_id, sim_score, ct = candidate_ids[idx]
+                data = self._fetch_details(ct, tmdb_id)
+                if not data or data.get("vote_average", 0) < MIN_VOTE_AVERAGE:
+                    return idx, None, None, None, None
+                return idx, tmdb_id, sim_score, ct, data
+
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                results = list(pool.map(_job, range(i, end)))
+
+            for idx, tmdb_id, sim_score, ct, data in sorted(results, key=lambda x: x[0]):
+                if data is None:
+                    continue
+                clean_rec = self._build_clean_rec(tmdb_id, ct, data, sim_score, len(clean))
+                clean.append(clean_rec)
+                if len(clean) >= PAGE_SIZE:
+                    break
+
+            i = end
+        return clean
+
     # ============================================================================
     # KULLANICI ÖNERİ METODLARI
     # ============================================================================
 
     def get_emotion_based_recommendations(self, user_id: int, emotion_data: EmotionBasedRecommendation) -> Dict[str, Any]:
-        """
-        Kullanıcının anlık duygu durumuna göre öneriler
-        - %100 anlık duygu odaklı
-        - Geçmiş verileri kullanmaz
-        """
+        """Kullanıcının anlık duygu durumuna göre öneriler."""
         try:
             # Handle "all" content type
             if emotion_data.content_type == "all":
                 return self._get_emotion_based_recommendations_all(user_id, emotion_data)
             
-            # Get emotion embedding from emotion analysis service
-            emotion_analysis = self.emotion_service.analyze_user_emotion(emotion_data.emotion)
-            emotion_embedding = emotion_analysis.get("emotion_embedding", [])
+            # Get emotion embedding or fallback to text
+            emb = self._get_emotion_embedding(emotion_data.emotion)
+            recommendations = self._search_by_emotion_or_text(
+                emotion_data.content_type, emb, emotion_data.emotion
+            )
             
-            if not emotion_embedding:
-                logger.warning("No emotion embedding generated, falling back to text-based search")
-                # Fallback to text-based search
-                recommendations = self.embedding_service.search_similar_content(
-                    query_text=emotion_data.emotion,
-                    top_k=EMBEDDING_TOP_K,
-                    content_type=emotion_data.content_type
-                )
-            else:
-                # Use emotion embedding for search
-                emotion_embedding_array = np.array(emotion_embedding)
-                recommendations = self.embedding_service.search_similar_content(
-                    query_text="",
-                    top_k=EMBEDDING_TOP_K,
-                    content_type=emotion_data.content_type,
-                    query_embedding=emotion_embedding_array
-                )
-            
-            # Filter out watched content and clean recommendations
+            # Prepare candidate IDs (lazy)
             user_ratings = self.rating_repo.get_user_ratings(user_id, emotion_data.content_type)
             watched_tmdb_ids = {rating.tmdb_id for rating in user_ratings}
-            
             seen_tmdb_ids = set()
-            clean_recommendations = []
-            
+            candidate_ids = []
             for rec in recommendations:
                 tmdb_id = rec.get("tmdb_id")
-                
-                # Skip if already seen or watched
-                if tmdb_id in seen_tmdb_ids or tmdb_id in watched_tmdb_ids:
+                if tmdb_id is None or tmdb_id in seen_tmdb_ids or tmdb_id in watched_tmdb_ids:
                     continue
-                
                 seen_tmdb_ids.add(tmdb_id)
-                
-                # Get detailed content info from TMDB
-                try:
-                    if emotion_data.content_type == "movie":
-                        content_response = self.tmdb_movie_service.get_movie_details(tmdb_id)
-                    else:
-                        content_response = self.tmdb_tv_service.get_tv_show_details(tmdb_id)
-                    
-                    if content_response.success:
-                        content_data = content_response.data
-                        
-                        # Filter out low-rated content (IMDB 6.0 altı)
-                        vote_average = content_data.get("vote_average", 0)
-                        if vote_average < 6.0:
-                            continue
-                        
-                        # Clean recommendation data
-                        clean_rec = {
-                            "tmdb_id": tmdb_id,
-                            "content_type": emotion_data.content_type,
-                            "title": content_data.get("title", rec.get("title", "")),
-                            "overview": content_data.get("overview", rec.get("overview", "")),
-                            "backdrop_path": content_data.get("backdrop_path"),
-                            "poster_path": content_data.get("poster_path"),
-                            "release_date": content_data.get("release_date"),
-                            "vote_average": vote_average,
-                            "similarity_score": float(rec.get("similarity_score", 0.0)),
-                            "rank": len(clean_recommendations) + 1
-                        }
-                        clean_recommendations.append(clean_rec)
-                        
-                        # Save to history
-                        self.recommendation_repo.save_recommendation(
-                            user_id=user_id,
-                            tmdb_id=tmdb_id,
-                            content_type=emotion_data.content_type,
-                            recommendation_type="current_emotion",
-                            emotion_state=emotion_data.emotion,
-                            score=rec["similarity_score"]
-                        )
-                        
-                        # Early stop when enough items are collected
-                        if len(clean_recommendations) >= MAX_RECOMMENDATIONS:
-                            break
-                            
-                except Exception as e:
-                    logger.warning(f"Error getting details for {emotion_data.content_type} {tmdb_id}: {str(e)}")
-                    continue
+                candidate_ids.append((tmdb_id, rec.get("similarity_score", 0.0)))
+                if len(candidate_ids) >= MAX_RECOMMENDATIONS:
+                    break
+
+            # Pagination with stable PAGE_SIZE items (fill by looking ahead)
+            page = min(max(getattr(emotion_data, "page", 1), 1), MAX_PAGES)
+            clean_recommendations = self._stable_page_enrich_single(
+                candidate_ids,
+                page,
+                emotion_data.content_type,
+                save_params={
+                    "user_id": user_id,
+                    "recommendation_type": "current_emotion",
+                    "emotion_state": emotion_data.emotion,
+                },
+            )
             
             return {
                 "success": True,
@@ -150,7 +225,10 @@ class RecommendationService:
                     "recommendations": clean_recommendations,
                     "emotion": emotion_data.emotion,
                     "content_type": emotion_data.content_type,
-                    "total": len(clean_recommendations),
+                    "total": len(candidate_ids),
+                    "page": page,
+                    "page_size": PAGE_SIZE,
+                    "total_pages": min((len(candidate_ids) + PAGE_SIZE - 1) // PAGE_SIZE, MAX_PAGES),
                     "method": "current_emotion"
                 }
             }
@@ -162,36 +240,19 @@ class RecommendationService:
     # KAMUYA AÇIK (AUTH GEREKTİRMEYEN) ÖNERİ METODLARI
     # ============================================================================
 
-    def get_emotion_based_recommendations_public(self, emotion_text: str, content_type: str = "movie", exclude_tmdb_ids: Optional[set] = None) -> Dict[str, Any]:
-        """
-        Token gerektirmeyen, anlık duygu metnine göre öneriler.
-        - Kullanıcı geçmişine bakmaz, history kaydetmez.
-        - Temel temizleme ve TMDB detaylarıyla zenginleştirme yapar.
-        """
+    def get_emotion_based_recommendations_public(self, emotion_text: str, content_type: str = "movie", exclude_tmdb_ids: Optional[set] = None, page: int = 1) -> Dict[str, Any]:
+        """Token gerektirmeyen, anlık duygu metnine göre öneriler."""
         try:
+            # All türü için hem movie hem tv sonuçlarını birleştir
+            if content_type == "all":
+                return self._get_emotion_based_recommendations_public_all(emotion_text, page)
             # Get current emotion embedding
-            emotion_analysis = self.emotion_service.analyze_user_emotion(emotion_text)
-            emotion_embedding = emotion_analysis.get("emotion_embedding", [])
-
-            if emotion_embedding:
-                emotion_array = np.array(emotion_embedding)
-                recommendations = self.embedding_service.search_similar_content(
-                    query_text="",
-                    top_k=EMBEDDING_TOP_K,
-                    content_type=content_type,
-                    query_embedding=emotion_array
-                )
-            else:
-                # Fallback to text-based
-                recommendations = self.embedding_service.search_similar_content(
-                    query_text=emotion_text,
-                    top_k=EMBEDDING_TOP_K,
-                    content_type=content_type
-                )
+            emb = self._get_emotion_embedding(emotion_text)
+            recommendations = self._search_by_emotion_or_text(content_type, emb, emotion_text)
 
             seen_tmdb_ids = set()
             exclude_ids = set(exclude_tmdb_ids or [])
-            clean_recommendations = []
+            candidate_ids = []
 
             for rec in recommendations:
                 tmdb_id = rec.get("tmdb_id")
@@ -200,39 +261,19 @@ class RecommendationService:
                 seen_tmdb_ids.add(tmdb_id)
 
                 try:
-                    if content_type == "movie":
-                        content_response = self.tmdb_movie_service.get_movie_details(tmdb_id)
-                    else:
-                        content_response = self.tmdb_tv_service.get_tv_show_details(tmdb_id)
-
-                    if not content_response.success:
-                        continue
-
-                    content_data = content_response.data
-                    vote_average = content_data.get("vote_average", 0)
-                    if vote_average < 6.0:
-                        continue
-
-                    clean_rec = {
-                        "tmdb_id": tmdb_id,
-                        "content_type": content_type,
-                        "title": content_data.get("title") or content_data.get("name") or rec.get("title", ""),
-                        "overview": content_data.get("overview", rec.get("overview", "")),
-                        "backdrop_path": content_data.get("backdrop_path"),
-                        "poster_path": content_data.get("poster_path"),
-                        "release_date": content_data.get("release_date") or content_data.get("first_air_date"),
-                        "vote_average": vote_average,
-                        "similarity_score": float(rec.get("similarity_score", 0.0)),
-                        "rank": len(clean_recommendations) + 1
-                    }
-                    clean_recommendations.append(clean_rec)
-
-                    if len(clean_recommendations) >= MAX_RECOMMENDATIONS:
+                    candidate_ids.append((tmdb_id, float(rec.get("similarity_score", 0.0))))
+                    if len(candidate_ids) >= MAX_RECOMMENDATIONS:
                         break
-
-                except Exception as inner_e:
-                    logger.warning(f"Public recommendations: error enriching {content_type} {tmdb_id}: {inner_e}")
+                except Exception:
                     continue
+
+            # Pagination indices (1..MAX_PAGES)
+            page = min(max(page, 1), MAX_PAGES)
+            clean_recommendations = self._stable_page_enrich_single(
+                candidate_ids,
+                page,
+                content_type,
+            )
 
             return {
                 "success": True,
@@ -240,7 +281,10 @@ class RecommendationService:
                     "recommendations": clean_recommendations,
                     "emotion": emotion_text,
                     "content_type": content_type,
-                    "total": len(clean_recommendations),
+                    "total": len(candidate_ids),
+                    "page": page,
+                    "page_size": PAGE_SIZE,
+                    "total_pages": min((len(candidate_ids) + PAGE_SIZE - 1) // PAGE_SIZE, MAX_PAGES),
                     "method": "emotion_public"
                 }
             }
@@ -248,12 +292,55 @@ class RecommendationService:
             logger.error(f"Error getting public emotion-based recommendations: {str(e)}")
             return {"success": False, "error": str(e)}
 
+    def _get_emotion_based_recommendations_public_all(self, emotion_text: str, page: int) -> Dict[str, Any]:
+        """Public all: movie ve tv adaylarını birleştirip 9'luk sayfa döndürür."""
+        try:
+            # 1) Emotion embedding veya text kullan
+            emb = self._get_emotion_embedding(emotion_text)
+
+            # 2) Her tür için arama yap
+            def search_for_type(ct: str):
+                return self._search_by_emotion_or_text(ct, emb, emotion_text)
+
+            movie_recs = search_for_type("movie")
+            tv_recs = search_for_type("tv")
+
+            # 3) Aday havuzu (tmdb_id, score, content_type)
+            seen_ids = set()
+            candidate_ids: list[tuple[int, float, str]] = []
+            for ct, recs in (("movie", movie_recs), ("tv", tv_recs)):
+                for rec in recs:
+                    tmdb_id = rec.get("tmdb_id")
+                    if tmdb_id is None or (ct, tmdb_id) in seen_ids:
+                        continue
+                    seen_ids.add((ct, tmdb_id))
+                    candidate_ids.append((tmdb_id, float(rec.get("similarity_score", 0.0)), ct))
+                    if len(candidate_ids) >= MAX_RECOMMENDATIONS:
+                        break
+
+            # 4) Stabil sayfalama (9 öğe doldurmak için ileri bakış)
+            page = min(max(page, 1), MAX_PAGES)
+            clean_recommendations = self._stable_page_enrich_mixed(candidate_ids, page)
+
+            return {
+                "success": True,
+                "data": {
+                    "recommendations": clean_recommendations,
+                    "emotion": emotion_text,
+                    "content_type": "all",
+                    "total": len(candidate_ids),
+                    "page": page,
+                    "page_size": PAGE_SIZE,
+                    "total_pages": min((len(candidate_ids) + PAGE_SIZE - 1) // PAGE_SIZE, MAX_PAGES),
+                    "method": "emotion_public_all"
+                }
+            }
+        except Exception as e:
+            logger.error(f"Error getting public emotion-based recommendations (all): {str(e)}")
+            return {"success": False, "error": str(e)}
+
     def get_hybrid_recommendations(self, user_id: int, emotion_text: str, content_type: str = "movie", exclude_tmdb_ids: Optional[set] = None) -> Dict[str, Any]:
-        """
-        Hibrit öneriler: %70-80 duygu durumu + %20-30 izleme geçmişi
-        - Kullanıcının anlık duygu durumu ve geçmişini birleştirir
-        - En dengeli öneri sistemi
-        """
+        """Hibrit öneriler: anlık duygu + geçmiş profil birleşimi."""
         try:
             # Handle "all" content type
             if content_type == "all":
@@ -305,88 +392,37 @@ class RecommendationService:
             else:
                 # Fallback to emotion-based search
                 if emotion_embedding:
-                    emotion_array = np.array(emotion_embedding)
-                    recommendations = self.embedding_service.search_similar_content(
-                        query_text="",
-                        top_k=EMBEDDING_TOP_K,
-                        content_type=content_type,
-                        query_embedding=emotion_array
-                    )
+                    recommendations = self._search_by_emotion_or_text(content_type, np.array(emotion_embedding), emotion_text)
                 else:
-                    # Final fallback to text-based search
-                    recommendations = self.embedding_service.search_similar_content(
-                        query_text=emotion_text,
-                        top_k=EMBEDDING_TOP_K,
-                        content_type=content_type
-                    )
+                    recommendations = self._search_by_emotion_or_text(content_type, None, emotion_text)
             
-            # Filter out watched content and clean recommendations
+            # Prepare candidate IDs (lazy)
             user_ratings = self.rating_repo.get_user_ratings(user_id, content_type)
             watched_tmdb_ids = {rating.tmdb_id for rating in user_ratings}
-            
-            logger.info(f"Hybrid recommendations: Found {len(recommendations)} initial recommendations")
-            logger.info(f"User has {len(watched_tmdb_ids)} watched movies")
-            
             seen_tmdb_ids = set()
             exclude_ids = set(exclude_tmdb_ids or [])
-            clean_recommendations = []
-            
+            candidate_ids = []
             for rec in recommendations:
                 tmdb_id = rec.get("tmdb_id")
-                
-                # Skip if already seen or watched
                 if tmdb_id is None or tmdb_id in seen_tmdb_ids or tmdb_id in watched_tmdb_ids or tmdb_id in exclude_ids:
-                    logger.info(f"Hybrid: Skipping duplicate/watched movie {tmdb_id}")
                     continue
-                
                 seen_tmdb_ids.add(tmdb_id)
-                
-                # Get detailed content info from TMDB
-                try:
-                    if content_type == "movie":
-                        content_response = self.tmdb_movie_service.get_movie_details(tmdb_id)
-                    else:
-                        content_response = self.tmdb_tv_service.get_tv_show_details(tmdb_id)
-                    
-                    if content_response.success:
-                        content_data = content_response.data
-                        
-                        # Filter out low-rated content (IMDB 6.0 altı)
-                        vote_average = content_data.get("vote_average", 0)
-                        if vote_average < 6.0:
-                            continue
-                        
-                        # Clean recommendation data
-                        clean_rec = {
-                            "tmdb_id": tmdb_id,
-                            "content_type": content_type,
-                            "title": content_data.get("title", rec.get("title", "")),
-                            "overview": content_data.get("overview", rec.get("overview", "")),
-                            "backdrop_path": content_data.get("backdrop_path"),
-                            "poster_path": content_data.get("poster_path"),
-                            "release_date": content_data.get("release_date"),
-                            "vote_average": vote_average,
-                            "similarity_score": float(rec.get("similarity_score", 0.0)),
-                            "rank": len(clean_recommendations) + 1
-                        }
-                        clean_recommendations.append(clean_rec)
-                        
-                        # Save to history
-                        self.recommendation_repo.save_recommendation(
-                            user_id=user_id,
-                            tmdb_id=tmdb_id,
-                            content_type=content_type,
-                            recommendation_type="hybrid",
-                            emotion_state=emotion_text,
-                            score=rec["similarity_score"]
-                        )
-                        
-                        if len(clean_recommendations) >= MAX_RECOMMENDATIONS:
-                            break
-                            
-                except Exception as e:
-                    logger.warning(f"Error getting details for {content_type} {tmdb_id}: {str(e)}")
-                    continue
+                candidate_ids.append((tmdb_id, rec.get("similarity_score", 0.0)))
+                if len(candidate_ids) >= MAX_RECOMMENDATIONS:
+                    break
+
+            # Pagination indices (from router) with stable PAGE_SIZE
+            page = getattr(self, "_page", 1)
+            clean_recommendations = self._stable_page_enrich_single(
+                candidate_ids,
+                page,
+                content_type,
+                save_params={
+                    "user_id": user_id,
+                    "recommendation_type": "hybrid",
+                    "emotion_state": emotion_text,
+                },
+            )
             
             return {
                 "success": True,
@@ -394,7 +430,10 @@ class RecommendationService:
                     "recommendations": clean_recommendations,
                     "emotion": emotion_text,
                     "content_type": content_type,
-                    "total": len(clean_recommendations),
+                    "total": len(candidate_ids),
+                    "page": page,
+                    "page_size": PAGE_SIZE,
+                    "total_pages": min((len(candidate_ids) + PAGE_SIZE - 1) // PAGE_SIZE, MAX_PAGES),
                     "user_emotion_confidence": user_emotion.get("confidence", 0.0),
                     "current_emotion_confidence": emotion_analysis.get("confidence", 0.0),
                     "recommendation_type": "hybrid",
@@ -409,11 +448,7 @@ class RecommendationService:
             return {"success": False, "error": str(e)}
 
     def get_history_based_recommendations(self, user_id: int, history_data: HistoryBasedRecommendation) -> Dict[str, Any]:
-        """
-        Kullanıcının izleme geçmişine göre öneriler
-        - Kullanıcının rate ettiği filmlerin benzerlerini önerir
-        - %100 geçmiş odaklı
-        """
+        """Kullanıcının izleme geçmişine göre öneriler."""
         try:
             # Get user's ratings
             user_ratings = self.rating_repo.get_user_ratings(user_id, history_data.content_type)
@@ -549,12 +584,7 @@ class RecommendationService:
             return {"success": False, "error": str(e)}
 
     def get_profile_based_recommendations(self, user_id: int, content_type: str = "movie") -> Dict[str, Any]:
-        """
-        Kullanıcının emotion profile'ına göre öneriler
-        - Emotion text gerektirmez
-        - Kullanıcının geçmiş duygu analizlerini kullanır
-        - %100 profile odaklı
-        """
+        """Kullanıcının emotion profile'ına göre öneriler."""
         try:
             # Step 1: Get user's emotional profile
             user_profile = self.embedding_service.get_user_emotional_profile(user_id, self.db)
@@ -667,7 +697,7 @@ class RecommendationService:
     # ============================================================================
 
     def _get_hybrid_recommendations_all(self, user_id: int, emotion_text: str) -> Dict[str, Any]:
-        """Get hybrid recommendations for both movies and TV shows"""
+        """Hybrid önerileri her iki tür için getirir."""
         try:
             # Get recommendations for both content types
             movie_result = self.get_hybrid_recommendations(user_id, emotion_text, "movie")
@@ -710,7 +740,7 @@ class RecommendationService:
             return {"success": False, "error": str(e)}
 
     def _get_emotion_based_recommendations_all(self, user_id: int, emotion_data: EmotionBasedRecommendation) -> Dict[str, Any]:
-        """Get emotion-based recommendations for both movies and TV shows"""
+        """Emotion-based önerileri her iki tür için getirir."""
         try:
             # Get recommendations for both content types
             movie_result = self.get_emotion_based_recommendations(
@@ -819,8 +849,9 @@ class RecommendationService:
                         if self.embedding_service.add_content(content):
                             added_count += 1
             
-            # Save the index
+            # Save the index and optimize if large
             self.embedding_service.save_index()
+            ivf_optimized = self.embedding_service.optimize_index_if_large()
             
             return {
                 "success": True,
@@ -828,7 +859,8 @@ class RecommendationService:
                     "added_count": added_count,
                     "content_type": content_type,
                     "pages": pages,
-                    "index_stats": self.embedding_service.get_index_stats()
+                    "index_stats": self.embedding_service.get_index_stats(),
+                    "ivf_optimized": ivf_optimized
                 }
             }
         except Exception as e:
@@ -910,6 +942,254 @@ class RecommendationService:
             }
         except Exception as e:
             logger.error(f"Error populating embedding index with details: {str(e)}")
+            return {"success": False, "error": str(e)}
+
+    def populate_recent_content(self, content_type: str = "movie", days: int = 1, pages: int = 3, use_details: bool = False) -> Dict[str, Any]:
+        """Populate embedding index with recently released/airing content.
+
+        Params:
+        - content_type: "movie" | "tv"
+        - days: kaç gün öncesinden başlasın (UTC)
+        - pages: TMDB discover sayfa sayısı
+        - use_details: Her içerik için detayları çekip zengin metinle embed et
+        """
+        try:
+            from_date = (datetime.utcnow() - timedelta(days=days)).date().isoformat()
+            added = 0
+            skipped = 0
+            failed = 0
+
+            for page in range(1, pages + 1):
+                if content_type == "movie":
+                    # Discover by release date
+                    response = self.tmdb_movie_service.discover_movies(
+                        page,
+                        sort_by="popularity.desc",
+                        **{
+                            "primary_release_date.gte": from_date,
+                            "vote_average.gte": MIN_VOTE_AVERAGE,
+                        }
+                    )
+                else:
+                    response = self.tmdb_tv_service.discover_tv_shows(
+                        page,
+                        sort_by="popularity.desc",
+                        **{
+                            "first_air_date.gte": from_date,
+                            "vote_average.gte": MIN_VOTE_AVERAGE,
+                        }
+                    )
+
+                if not response.success:
+                    failed += 1
+                    continue
+
+                for content in response.data.get("results", []):
+                    try:
+                        tmdb_id = content.get("id")
+                        if not tmdb_id:
+                            skipped += 1
+                            continue
+
+                        # Normalize fields
+                        content["tmdb_id"] = tmdb_id
+                        content["content_type"] = content_type
+
+                        if use_details:
+                            # Fetch details for richer text
+                            if content_type == "movie":
+                                details = self.tmdb_movie_service.get_movie_details(tmdb_id)
+                            else:
+                                details = self.tmdb_tv_service.get_tv_show_details(tmdb_id)
+
+                            if details and details.success:
+                                full = details.data
+                                full["tmdb_id"] = tmdb_id
+                                full["content_type"] = content_type
+                                ok = self.embedding_service.add_content_with_details(full, self.db)
+                            else:
+                                ok = self.embedding_service.add_content(content)
+                        else:
+                            ok = self.embedding_service.add_content(content)
+
+                        if ok:
+                            added += 1
+                        else:
+                            skipped += 1
+                    except Exception:
+                        failed += 1
+
+            # Save the index after population and optimize if large
+            self.embedding_service.save_index()
+            ivf_optimized = self.embedding_service.optimize_index_if_large()
+
+            return {
+                "success": True,
+                "data": {
+                    "added": added,
+                    "skipped": skipped,
+                    "failed_pages": failed,
+                    "content_type": content_type,
+                    "days": days,
+                    "pages": pages,
+                    "index_stats": self.embedding_service.get_index_stats(),
+                    "ivf_optimized": ivf_optimized,
+                },
+            }
+        except Exception as e:
+            logger.error(f"Error populating recent content: {str(e)}")
+            return {"success": False, "error": str(e)}
+
+    def bulk_populate_popular(self, content_type: str = "movie", start_page: int = 1, end_page: int = 500, use_details: bool = False) -> Dict[str, Any]:
+        """Bulk populate using TMDB 'popular' pages in range [start_page, end_page]."""
+        try:
+            added = 0
+            failed_pages = 0
+            skipped = 0
+
+            get_page = self.tmdb_movie_service.get_popular_movies if content_type == "movie" else self.tmdb_tv_service.get_popular_tv_shows
+
+            for page in range(start_page, end_page + 1):
+                response = get_page(page)
+                if not response.success:
+                    failed_pages += 1
+                    continue
+
+                for content in response.data.get("results", []):
+                    tmdb_id = content.get("id")
+                    if not tmdb_id:
+                        skipped += 1
+                        continue
+                    content["tmdb_id"] = tmdb_id
+                    content["content_type"] = content_type
+
+                    ok = False
+                    if use_details:
+                        if content_type == "movie":
+                            details = self.tmdb_movie_service.get_movie_details(tmdb_id)
+                        else:
+                            details = self.tmdb_tv_service.get_tv_show_details(tmdb_id)
+                        if details and details.success:
+                            full = details.data
+                            full["tmdb_id"] = tmdb_id
+                            full["content_type"] = content_type
+                            ok = self.embedding_service.add_content_with_details(full, self.db)
+                    if not use_details or not ok:
+                        ok = self.embedding_service.add_content(content)
+
+                    if ok:
+                        added += 1
+                    else:
+                        skipped += 1
+
+            self.embedding_service.save_index()
+            ivf_optimized = self.embedding_service.optimize_index_if_large()
+            return {
+                "success": True,
+                "data": {
+                    "added": added,
+                    "failed_pages": failed_pages,
+                    "skipped": skipped,
+                    "range": [start_page, end_page],
+                    "content_type": content_type,
+                    "index_stats": self.embedding_service.get_index_stats(),
+                    "ivf_optimized": ivf_optimized,
+                },
+            }
+        except Exception as e:
+            logger.error(f"Error in bulk_populate_popular: {str(e)}")
+            return {"success": False, "error": str(e)}
+
+    def continue_bulk_popular(self, content_type: str = "movie", batch_pages: int = 25, use_details: bool = False) -> Dict[str, Any]:
+        """Continue bulk popular ingestion from the last saved page in Redis.
+
+        Stores progress per content_type in key: tmdb:ingest:popular:{content_type}:last_page
+        """
+        try:
+            key = f"tmdb:ingest:popular:{content_type}:last_page"
+            last_page_raw = self.cache.get_json(key)
+            last_page = int(last_page_raw) if isinstance(last_page_raw, (int, str)) and str(last_page_raw).isdigit() else 0
+            start_page = max(1, last_page + 1)
+            end_page = min(500, start_page + batch_pages - 1)
+
+            result = self.bulk_populate_popular(content_type, start_page, end_page, use_details)
+            if result.get("success"):
+                # Persist new last page
+                self.cache.set_json(key, end_page, ttl_seconds=7 * 24 * 60 * 60)
+                result["data"]["start_page"] = start_page
+                result["data"]["end_page"] = end_page
+                result["data"]["last_page_saved"] = end_page
+            return result
+        except Exception as e:
+            logger.error(f"Error in continue_bulk_popular: {str(e)}")
+            return {"success": False, "error": str(e)}
+
+    def bulk_populate_by_year(self, content_type: str = "movie", year: int = 2020, pages: int = 100, use_details: bool = False) -> Dict[str, Any]:
+        """Bulk populate using TMDB discover by year."""
+        try:
+            added = 0
+            skipped = 0
+            failed_pages = 0
+
+            for page in range(1, pages + 1):
+                if content_type == "movie":
+                    response = self.tmdb_movie_service.discover_movies(
+                        page,
+                        sort_by="popularity.desc",
+                        primary_release_year=year,
+                        **{"vote_average.gte": MIN_VOTE_AVERAGE}
+                    )
+                else:
+                    response = self.tmdb_tv_service.discover_tv_shows(
+                        page,
+                        sort_by="popularity.desc",
+                        first_air_date_year=year,
+                        **{"vote_average.gte": MIN_VOTE_AVERAGE}
+                    )
+                if not response.success:
+                    failed_pages += 1
+                    continue
+                for content in response.data.get("results", []):
+                    tmdb_id = content.get("id")
+                    if not tmdb_id:
+                        skipped += 1
+                        continue
+                    content["tmdb_id"] = tmdb_id
+                    content["content_type"] = content_type
+                    ok = False
+                    if use_details:
+                        if content_type == "movie":
+                            details = self.tmdb_movie_service.get_movie_details(tmdb_id)
+                        else:
+                            details = self.tmdb_tv_service.get_tv_show_details(tmdb_id)
+                        if details and details.success:
+                            full = details.data
+                            full["tmdb_id"] = tmdb_id
+                            full["content_type"] = content_type
+                            ok = self.embedding_service.add_content_with_details(full, self.db)
+                    if not use_details or not ok:
+                        ok = self.embedding_service.add_content(content)
+                    if ok:
+                        added += 1
+                    else:
+                        skipped += 1
+            self.embedding_service.save_index()
+            ivf_optimized = self.embedding_service.optimize_index_if_large()
+            return {
+                "success": True,
+                "data": {
+                    "added": added,
+                    "skipped": skipped,
+                    "failed_pages": failed_pages,
+                    "year": year,
+                    "pages": pages,
+                    "content_type": content_type,
+                    "index_stats": self.embedding_service.get_index_stats(),
+                    "ivf_optimized": ivf_optimized,
+                },
+            }
+        except Exception as e:
+            logger.error(f"Error in bulk_populate_by_year: {str(e)}")
             return {"success": False, "error": str(e)}
 
     def populate_embedding_index_by_genre(self, content_type: str = "movie", genre_id: int = None, pages: int = 3) -> Dict[str, Any]:

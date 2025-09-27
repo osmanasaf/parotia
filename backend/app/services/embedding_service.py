@@ -21,8 +21,10 @@ class EmbeddingService:
         self.model = None
         self.index = None
         self.content_data = []
-        self.embedding_cache_path = "embeddings_cache.pkl"
-        self.index_cache_path = "faiss_index.bin"
+        base_dir = self.settings.INDEX_DIR or "."
+        os.makedirs(base_dir, exist_ok=True)
+        self.embedding_cache_path = os.path.join(base_dir, "embeddings_cache.pkl")
+        self.index_cache_path = os.path.join(base_dir, "faiss_index.bin")
         
         self._load_model()
         self._load_or_create_index()
@@ -73,6 +75,31 @@ class EmbeddingService:
         except Exception as e:
             logger.error(f"Error creating index: {str(e)}")
             raise
+
+    def optimize_index_if_large(self):
+        """Recreate index as IVF if content size grew beyond threshold, preserving data."""
+        try:
+            total_items = len(self.content_data)
+            if total_items <= 100000:
+                return False
+            # Rebuild IVF index from stored embeddings
+            dimension = self.model.get_sentence_embedding_dimension()
+            nlist = min(4096, total_items // 100)
+            quantizer = faiss.IndexFlatIP(dimension)
+            new_index = faiss.IndexIVFFlat(quantizer, dimension, nlist)
+            # Train IVF with a sample (use all if feasible)
+            vectors = np.array([item.get("embedding_vector") for item in self.content_data if item.get("embedding_vector") is not None])
+            if vectors.shape[0] == 0:
+                return False
+            new_index.train(vectors)
+            new_index.add(vectors)
+            self.index = new_index
+            self._save_index()
+            logger.info(f"Optimized FAISS index to IVF with nlist={nlist} for {total_items} items")
+            return True
+        except Exception as e:
+            logger.error(f"Error optimizing index: {str(e)}")
+            return False
     
     def _save_index(self):
         """Save FAISS index and content data"""

@@ -26,6 +26,19 @@ class Settings(BaseSettings):
     # TMDB API
     TMDB_API_KEY: str = os.getenv("TMDB_API_KEY", "")
     
+    # Redis
+    REDIS_URL: Optional[str] = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+
+    # Scheduler
+    ENABLE_SCHEDULER: bool = os.getenv("ENABLE_SCHEDULER", "true").lower() == "true"
+    SCHEDULE_HOUR: int = int(os.getenv("SCHEDULE_HOUR", "2"))
+    SCHEDULE_MINUTE: int = int(os.getenv("SCHEDULE_MINUTE", "0"))
+    SCHEDULE_MOVIE_BATCH_PAGES: int = int(os.getenv("SCHEDULE_MOVIE_BATCH_PAGES", "25"))
+    SCHEDULE_TV_BATCH_PAGES: int = int(os.getenv("SCHEDULE_TV_BATCH_PAGES", "25"))
+
+    # Embedding/Index storage
+    INDEX_DIR: str = os.getenv("INDEX_DIR", ".")
+
 
     
     # Environment
