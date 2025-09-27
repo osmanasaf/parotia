@@ -15,4 +15,6 @@ numpy
 faiss-cpu
 redis
 apscheduler
+email-validator
+resend
 

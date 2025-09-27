@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import Dict, Any
+from app.core.config import get_settings
 
 class EmailSender(ABC):
     """Abstract email sender interface"""
@@ -58,3 +59,26 @@ class ConsoleEmailSender(EmailSender):
             print(f"Verification Code: {kwargs['verification_code']}")
         print("=" * 50)
         return True 
+
+
+class ResendEmailSender(EmailSender):
+    """Resend email sender implementation"""
+    def __init__(self, api_key: str, from_email: str):
+        import resend  # lazy import
+        self.resend = resend
+        self.resend.api_key = api_key
+        self.from_email = from_email
+
+    def send_email(self, to_email: str, subject: str, body: str, **kwargs) -> bool:
+        try:
+            params = {
+                "from": self.from_email,
+                "to": [to_email],
+                "subject": subject,
+                "html": body,
+            }
+            email = self.resend.Emails.send(params)  # type: ignore
+            return True if email else False
+        except Exception as e:
+            print(f"Resend Error: {str(e)}")
+            return False

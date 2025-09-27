@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     SMTP_USERNAME: Optional[str] = os.getenv("SMTP_USERNAME")
     SMTP_PASSWORD: Optional[str] = os.getenv("SMTP_PASSWORD")
     FROM_EMAIL: Optional[str] = os.getenv("FROM_EMAIL")
+    # Resend
+    RESEND_API_KEY: Optional[str] = os.getenv("RESEND_API_KEY")
+    RESEND_FROM_EMAIL: Optional[str] = os.getenv("RESEND_FROM_EMAIL")
     
     # Verification
     VERIFICATION_CODE_EXPIRE_MINUTES: int = int(os.getenv("VERIFICATION_CODE_EXPIRE_MINUTES", "10"))
