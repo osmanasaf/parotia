@@ -21,6 +21,6 @@ RUN mkdir -p /data
 
 WORKDIR /app
 
-CMD ["python", "backend/app/run.py"]
+CMD ["sh", "-c", "uvicorn backend.app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
 
 
