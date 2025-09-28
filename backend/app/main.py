@@ -21,6 +21,7 @@ app = FastAPI(
 )
 
 # CORS middleware yapılandırması
+settings = get_settings()
 origins_env = settings.CORS_ALLOW_ORIGINS or ""
 origins = [o.strip() for o in origins_env.split(",") if o.strip()] or [
     "http://localhost:3000",
@@ -45,7 +46,6 @@ app.include_router(recommendations.router)
 app.include_router(auth.router)
 app.include_router(emotion_analysis.router) 
 
-settings = get_settings()
 if settings.ENABLE_SCHEDULER and APSCHEDULER_AVAILABLE:
     scheduler = BackgroundScheduler(timezone="UTC")
 
