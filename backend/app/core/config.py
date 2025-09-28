@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     RESEND_API_KEY: Optional[str] = os.getenv("RESEND_API_KEY")
     RESEND_FROM_EMAIL: Optional[str] = os.getenv("RESEND_FROM_EMAIL")
     
+    # CORS
+    CORS_ALLOW_ORIGINS: Optional[str] = os.getenv("CORS_ALLOW_ORIGINS")
+
     # Verification
     VERIFICATION_CODE_EXPIRE_MINUTES: int = int(os.getenv("VERIFICATION_CODE_EXPIRE_MINUTES", "10"))
     

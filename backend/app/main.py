@@ -21,14 +21,17 @@ app = FastAPI(
 )
 
 # CORS middleware yapılandırması
+origins_env = settings.CORS_ALLOW_ORIGINS or ""
+origins = [o.strip() for o in origins_env.split(",") if o.strip()] or [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",  # React/Next.js development server
-        "http://127.0.0.1:3000",
-        "http://localhost:3001",  # Alternatif port
-        "http://127.0.0.1:3001",
-    ],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
