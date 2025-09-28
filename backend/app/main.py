@@ -4,6 +4,9 @@ from app.routers import health, movies, tv, recommendations, auth, emotion_analy
 from app.core.config import get_settings
 from app.db import SessionLocal
 from app.services.recommendation_service import RecommendationService
+from app.db import Base, engine
+from app import models  # ensure models are imported
+import os
 
 try:
     from apscheduler.schedulers.background import BackgroundScheduler
@@ -70,3 +73,10 @@ if settings.ENABLE_SCHEDULER and APSCHEDULER_AVAILABLE:
         replace_existing=True,
     )
     scheduler.start()
+
+
+@app.on_event("startup")
+async def init_db():
+    # İlk deploy için otomatik tablo oluşturma (idempotent)
+    if os.getenv("AUTO_CREATE_TABLES", "false").lower() == "true":
+        Base.metadata.create_all(bind=engine)
