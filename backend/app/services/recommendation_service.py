@@ -16,16 +16,18 @@ from app.core.config import get_settings
 from app.services.embedding_service import EmbeddingService
 from app.services.emotion_analysis_service import EmotionAnalysisService
 from app.core.cache import CacheService
+from app.services.language_service import LanguageService
 
 logger = logging.getLogger(__name__)
 
 # Performance/limit constants
-# 4 sayfa x 9 = 36
+# 5 sayfa x 9 = 45
 PAGE_SIZE = 9
-MAX_PAGES = 4
-MAX_RECOMMENDATIONS = PAGE_SIZE * MAX_PAGES  # 36
+MAX_PAGES = 5
+MAX_RECOMMENDATIONS = PAGE_SIZE * MAX_PAGES  # 45
 EMBEDDING_TOP_K = 80
 MIN_VOTE_AVERAGE = 6.0
+MIN_VOTE_COUNT = 1000
 DETAILS_FETCH_CHUNK = PAGE_SIZE * 2
 
 class RecommendationService:
@@ -51,6 +53,7 @@ class RecommendationService:
         # Initialize services
         self.embedding_service = EmbeddingService()
         self.emotion_service = EmotionAnalysisService(db)
+        self.language_service = LanguageService()
 
     # =========================================================================
     # YARDIMCI / ORTAK METODLAR (DRY & Performans)
@@ -116,7 +119,7 @@ class RecommendationService:
                 data = self._fetch_details(content_type, tmdb_id)
                 if not data:
                     return idx, None, None, None
-                if data.get("vote_average", 0) < MIN_VOTE_AVERAGE:
+                if data.get("vote_average", 0) < MIN_VOTE_AVERAGE or data.get("vote_count", 0) < MIN_VOTE_COUNT:
                     return idx, None, None, None
                 return idx, tmdb_id, sim_score, data
 
@@ -157,7 +160,7 @@ class RecommendationService:
             def _job(idx: int):
                 tmdb_id, sim_score, ct = candidate_ids[idx]
                 data = self._fetch_details(ct, tmdb_id)
-                if not data or data.get("vote_average", 0) < MIN_VOTE_AVERAGE:
+                if not data or data.get("vote_average", 0) < MIN_VOTE_AVERAGE or data.get("vote_count", 0) < MIN_VOTE_COUNT:
                     return idx, None, None, None, None
                 return idx, tmdb_id, sim_score, ct, data
 
@@ -186,10 +189,13 @@ class RecommendationService:
             if emotion_data.content_type == "all":
                 return self._get_emotion_based_recommendations_all(user_id, emotion_data)
             
-            # Get emotion embedding or fallback to text
-            emb = self._get_emotion_embedding(emotion_data.emotion)
+            # Dil tespiti & çeviri
+            src_lang = self.language_service.detect_language(emotion_data.emotion)
+            emo_text_en = self.language_service.translate_to_english(emotion_data.emotion, src_lang)
+            # Get emotion embedding or fallback to text (English)
+            emb = self._get_emotion_embedding(emo_text_en)
             recommendations = self._search_by_emotion_or_text(
-                emotion_data.content_type, emb, emotion_data.emotion
+                emotion_data.content_type, emb, emo_text_en
             )
             
             # Prepare candidate IDs (lazy)
@@ -205,6 +211,9 @@ class RecommendationService:
                 candidate_ids.append((tmdb_id, rec.get("similarity_score", 0.0)))
                 if len(candidate_ids) >= MAX_RECOMMENDATIONS:
                     break
+
+            # Yüksek benzerlik öne
+            candidate_ids.sort(key=lambda x: x[1], reverse=True)
 
             # Pagination with stable PAGE_SIZE items (fill by looking ahead)
             page = min(max(getattr(emotion_data, "page", 1), 1), MAX_PAGES)
@@ -246,9 +255,12 @@ class RecommendationService:
             # All türü için hem movie hem tv sonuçlarını birleştir
             if content_type == "all":
                 return self._get_emotion_based_recommendations_public_all(emotion_text, page)
+            # Dil tespiti & çeviri (public)
+            src_lang = self.language_service.detect_language(emotion_text)
+            emo_text_en = self.language_service.translate_to_english(emotion_text, src_lang)
             # Get current emotion embedding
-            emb = self._get_emotion_embedding(emotion_text)
-            recommendations = self._search_by_emotion_or_text(content_type, emb, emotion_text)
+            emb = self._get_emotion_embedding(emo_text_en)
+            recommendations = self._search_by_emotion_or_text(content_type, emb, emo_text_en)
 
             seen_tmdb_ids = set()
             exclude_ids = set(exclude_tmdb_ids or [])
@@ -266,6 +278,9 @@ class RecommendationService:
                         break
                 except Exception:
                     continue
+
+            # Yüksek benzerlik öne
+            candidate_ids.sort(key=lambda x: x[1], reverse=True)
 
             # Pagination indices (1..MAX_PAGES)
             page = min(max(page, 1), MAX_PAGES)
@@ -296,7 +311,9 @@ class RecommendationService:
         """Public all: movie ve tv adaylarını birleştirip 9'luk sayfa döndürür."""
         try:
             # 1) Emotion embedding veya text kullan
-            emb = self._get_emotion_embedding(emotion_text)
+            src_lang = self.language_service.detect_language(emotion_text)
+            emo_text_en = self.language_service.translate_to_english(emotion_text, src_lang)
+            emb = self._get_emotion_embedding(emo_text_en)
 
             # 2) Her tür için arama yap
             def search_for_type(ct: str):
@@ -317,6 +334,9 @@ class RecommendationService:
                     candidate_ids.append((tmdb_id, float(rec.get("similarity_score", 0.0)), ct))
                     if len(candidate_ids) >= MAX_RECOMMENDATIONS:
                         break
+
+            # Yüksek benzerlik öne
+            candidate_ids.sort(key=lambda x: x[1], reverse=True)
 
             # 4) Stabil sayfalama (9 öğe doldurmak için ileri bakış)
             page = min(max(page, 1), MAX_PAGES)
@@ -396,7 +416,7 @@ class RecommendationService:
                 else:
                     recommendations = self._search_by_emotion_or_text(content_type, None, emotion_text)
             
-            # Prepare candidate IDs (lazy)
+            # Prepare candidate IDs (lazy) — skor bazlı sıralama
             user_ratings = self.rating_repo.get_user_ratings(user_id, content_type)
             watched_tmdb_ids = {rating.tmdb_id for rating in user_ratings}
             seen_tmdb_ids = set()
@@ -410,6 +430,8 @@ class RecommendationService:
                 candidate_ids.append((tmdb_id, rec.get("similarity_score", 0.0)))
                 if len(candidate_ids) >= MAX_RECOMMENDATIONS:
                     break
+            # yüksek benzerlik öne
+            candidate_ids.sort(key=lambda x: x[1], reverse=True)
 
             # Pagination indices (from router) with stable PAGE_SIZE
             page = getattr(self, "_page", 1)
@@ -464,25 +486,17 @@ class RecommendationService:
                     }
                 }
             
-            # Convert to format expected by embedding service
+            # Convert to format expected by embedding service (lightweight, no TMDB fetch)
             ratings_data = []
             for rating in user_ratings:
                 try:
-                    # Get content details from TMDB
-                    if rating.content_type == "movie":
-                        content_response = self.tmdb_movie_service.get_movie_details(rating.tmdb_id)
-                    else:
-                        content_response = self.tmdb_tv_service.get_tv_show_details(rating.tmdb_id)
-                    
-                    if content_response.success:
-                        content_data = content_response.data
-                        content_data["content_type"] = rating.content_type
-                        ratings_data.append({
-                            "content": content_data,
-                            "rating": rating.rating
-                        })
+                    ratings_data.append({
+                        "tmdb_id": rating.tmdb_id,
+                        "content_type": rating.content_type,
+                        "rating": rating.rating,
+                    })
                 except Exception as e:
-                    logger.warning(f"Error getting content details for {rating.tmdb_id}: {str(e)}")
+                    logger.warning(f"Error preparing rating data for {rating.tmdb_id}: {str(e)}")
                     continue
             
             # Get user preference embedding

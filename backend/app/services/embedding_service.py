@@ -17,7 +17,8 @@ class EmbeddingService:
     
     def __init__(self):
         self.settings = get_settings()
-        self.model_name = "all-MiniLM-L6-v2"  # Lightweight but effective model
+        # Multilingual E5 model for better cross-lingual retrieval
+        self.model_name = "intfloat/multilingual-e5-base"
         self.model = None
         self.index = None
         self.content_data = []
@@ -48,6 +49,19 @@ class EmbeddingService:
                 with open(self.embedding_cache_path, 'rb') as f:
                     self.content_data = pickle.load(f)
                 logger.info(f"Loaded {len(self.content_data)} content items")
+
+                # Ensure index dimension matches current model
+                try:
+                    dim = self.model.get_sentence_embedding_dimension()
+                    if getattr(self.index, 'd', None) != dim:
+                        logger.warning(
+                            "FAISS index dimension mismatch with model; recreating index and clearing cache"
+                        )
+                        self.content_data = []
+                        self._create_new_index()
+                        self._save_index()
+                except Exception:
+                    pass
             else:
                 logger.info("Creating new FAISS index")
                 self._create_new_index()
@@ -165,6 +179,14 @@ class EmbeddingService:
             if vote_average < 6.0:
                 logger.info(f"Skipping low-rated content {content.get('tmdb_id')} (vote_average: {vote_average})")
                 return False
+
+            # Enforce minimum vote_count threshold for embedding quality
+            vote_count = content.get('vote_count', 0)
+            if vote_count < 1000:
+                logger.info(
+                    f"Skipping low-vote-count content {content.get('tmdb_id')} (vote_count: {vote_count})"
+                )
+                return False
             
             # Generate text representation
             text = self.generate_content_text(content)
@@ -173,7 +195,8 @@ class EmbeddingService:
                 return False
             
             # Generate embedding
-            embedding = self.model.encode([text])[0]
+            passage_text = f"passage: {text}"
+            embedding = self.model.encode([passage_text])[0]
             
             # Normalize embedding for cosine similarity
             embedding = embedding / np.linalg.norm(embedding)
@@ -207,6 +230,14 @@ class EmbeddingService:
             vote_average = content.get('vote_average', 0)
             if vote_average < 6.0:
                 logger.info(f"Skipping low-rated content {content.get('tmdb_id')} from database (vote_average: {vote_average})")
+                return False
+
+            # Enforce minimum vote_count threshold
+            vote_count = content.get('vote_count', 0)
+            if vote_count < 1000:
+                logger.info(
+                    f"Skipping low-vote-count content {content.get('tmdb_id')} from database (vote_count: {vote_count})"
+                )
                 return False
             
             # Check if already exists
@@ -275,7 +306,8 @@ class EmbeddingService:
                 search_embedding = user_embedding
             elif query_text:
                 # Generate embedding for query
-                search_embedding = self.model.encode([query_text])[0]
+                query_text_prefixed = f"query: {query_text}"
+                search_embedding = self.model.encode([query_text_prefixed])[0]
             else:
                 logger.error("No query text, user embedding, or query embedding provided")
                 return []
@@ -330,9 +362,23 @@ class EmbeddingService:
             weights = []
             
             for rating in user_ratings:
+                # Support both shapes:
+                # A) { tmdb_id, content_type, rating }
+                # B) { content: {...}, rating }
                 tmdb_id = rating.get("tmdb_id")
-                content_type = rating.get("content_type", "movie")
-                
+                content_type = rating.get("content_type")
+
+                if tmdb_id is None and isinstance(rating.get("content"), dict):
+                    content = rating["content"]
+                    tmdb_id = content.get("tmdb_id") or content.get("id")
+                    content_type = content.get("content_type", content_type)
+
+                if content_type is None:
+                    content_type = "movie"
+
+                if tmdb_id is None:
+                    continue
+
                 # Get content embedding
                 content_embedding = self.get_content_embedding(tmdb_id, content_type)
                 if content_embedding is not None:
@@ -484,7 +530,8 @@ class EmbeddingService:
     def encode_text(self, text: str) -> np.ndarray:
         """Encode text to embedding vector"""
         try:
-            embedding = self.model.encode([text])[0]
+            query_text = f"query: {text}"
+            embedding = self.model.encode([query_text])[0]
             return embedding
         except Exception as e:
             logger.error(f"Error encoding text: {str(e)}")
@@ -525,6 +572,15 @@ class EmbeddingService:
                 logger.warning(f"Could not fetch content data for {tmdb_id} ({content_type})")
                 return None
             
+            # Skip if vote_count threshold not satisfied
+            if hasattr(content_data, 'data'):
+                meta = content_data.data
+            else:
+                meta = content_data.__dict__ if hasattr(content_data, '__dict__') else dict(content_data)
+            if meta.get('vote_count', 0) < 1000:
+                logger.info(f"Skipping dynamic embedding for low vote_count item {tmdb_id}")
+                return None
+
             # Convert TMDBResponse to dict and add metadata
             if hasattr(content_data, 'data'):
                 content_dict = content_data.data
@@ -540,7 +596,8 @@ class EmbeddingService:
                 return None
             
             # Generate embedding
-            embedding = self.model.encode([text])[0]
+            passage_text = f"passage: {text}"
+            embedding = self.model.encode([passage_text])[0]
             
             # Cache the result
             content_dict["embedding_vector"] = embedding
@@ -637,7 +694,7 @@ class EmbeddingService:
             
             for emotion, query in emotional_queries.items():
                 # Generate embedding for emotional query
-                query_embedding = self.model.encode([query])[0]
+                query_embedding = self.model.encode([f"query: {query}"])[0]
                 query_embedding = query_embedding / np.linalg.norm(query_embedding)
                 
                 # Calculate similarity with user's emotional embedding

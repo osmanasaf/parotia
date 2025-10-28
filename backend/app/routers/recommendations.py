@@ -182,7 +182,7 @@ def continue_bulk_popular(
 @router.post("/current-emotion")
 def get_current_emotion_recommendations(
     payload: EmotionBasedRecommendation,
-    page: int = Query(1, ge=1, le=4, description="Page number (1-4)"),
+    page: int = Query(1, ge=1, le=5, description="Page number (1-5)"),
     db: Session = Depends(get_db)
 ):
     """
@@ -211,7 +211,7 @@ def get_current_emotion_recommendations(
 @router.post("/hybrid")
 def get_hybrid_recommendations(
     request: HybridRecommendationRequest,
-    page: int = Query(1, ge=1, le=4, description="Page number (1-4)"),
+    page: int = Query(1, ge=1, le=5, description="Page number (1-5)"),
     current_user_id: int = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):

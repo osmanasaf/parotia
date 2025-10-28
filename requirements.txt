@@ -17,4 +17,6 @@ redis
 apscheduler
 email-validator
 resend
+langdetect
+deep-translator
 

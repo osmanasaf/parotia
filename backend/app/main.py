@@ -80,6 +80,5 @@ if settings.ENABLE_SCHEDULER and APSCHEDULER_AVAILABLE:
 
 @app.on_event("startup")
 async def init_db():
-    # İlk deploy için otomatik tablo oluşturma (idempotent)
     if os.getenv("AUTO_CREATE_TABLES", "false").lower() == "true":
         Base.metadata.create_all(bind=engine)
