@@ -174,6 +174,17 @@ class EmbeddingService:
     def add_content_with_details(self, content: Dict[str, Any], db: Session = None) -> bool:
         """Add content with full details and generate embedding"""
         try:
+            # Ensure tmdb_id exists (map from 'id' if needed)
+            tmdb_id = content.get('tmdb_id') or content.get('id')
+            if tmdb_id is None:
+                logger.warning("Skipping content without tmdb_id/id")
+                return False
+            content['tmdb_id'] = tmdb_id
+
+            # Ensure content_type exists
+            if not content.get('content_type'):
+                content['content_type'] = 'movie' if content.get('title') else 'tv'
+
             # Filter out low-rated content (IMDB 6.0 altı)
             vote_average = content.get('vote_average', 0)
             if vote_average < 6.0:
@@ -226,6 +237,12 @@ class EmbeddingService:
         try:
             from app.models.content_embeddings import ContentEmbedding
             
+            # Ensure tmdb_id exists
+            tmdb_id = content.get('tmdb_id') or content.get('id')
+            if tmdb_id is None:
+                logger.warning("Skipping DB save due to missing tmdb_id/id")
+                return False
+
             # Filter out low-rated content (IMDB 6.0 altı)
             vote_average = content.get('vote_average', 0)
             if vote_average < 6.0:
@@ -242,7 +259,7 @@ class EmbeddingService:
             
             # Check if already exists
             existing = db.query(ContentEmbedding).filter(
-                ContentEmbedding.tmdb_id == content.get('tmdb_id'),
+                ContentEmbedding.tmdb_id == tmdb_id,
                 ContentEmbedding.content_type == content.get('content_type')
             ).first()
             
@@ -250,7 +267,7 @@ class EmbeddingService:
                 # Update existing record
                 existing.title = content.get('title') or content.get('name', '')
                 existing.overview = content.get('overview', '')
-                existing.genres = [genre.get('name') for genre in content.get('genres', [])]
+                existing.genres = [g.get('name') if isinstance(g, dict) else str(g) for g in content.get('genres', [])]
                 existing.release_date = content.get('release_date') or content.get('first_air_date', '')
                 existing.poster_path = content.get('poster_path', '')
                 existing.vote_average = content.get('vote_average', 0.0)
@@ -262,11 +279,11 @@ class EmbeddingService:
             else:
                 # Create new record
                 db_content = ContentEmbedding(
-                    tmdb_id=content.get('tmdb_id'),
+                    tmdb_id=tmdb_id,
                     content_type=content.get('content_type'),
                     title=content.get('title') or content.get('name', ''),
                     overview=content.get('overview', ''),
-                    genres=[genre.get('name') for genre in content.get('genres', [])],
+                    genres=[g.get('name') if isinstance(g, dict) else str(g) for g in content.get('genres', [])],
                     release_date=content.get('release_date') or content.get('first_air_date', ''),
                     poster_path=content.get('poster_path', ''),
                     vote_average=content.get('vote_average', 0.0),
