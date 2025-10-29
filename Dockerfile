@@ -1,5 +1,7 @@
 FROM python:3.11-slim
 
+ARG CACHE_BUSTER=20251029
+
 WORKDIR /app
 
 # System deps
