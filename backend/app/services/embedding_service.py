@@ -17,8 +17,7 @@ class EmbeddingService:
     
     def __init__(self):
         self.settings = get_settings()
-        # Multilingual E5 model for better cross-lingual retrieval
-        self.model_name = "intfloat/multilingual-e5-base"
+        self.model_name = "all-MiniLM-L6-v2"
         self.model = None
         self.index = None
         self.content_data = []
@@ -206,8 +205,7 @@ class EmbeddingService:
                 return False
             
             # Generate embedding
-            passage_text = f"passage: {text}"
-            embedding = self.model.encode([passage_text])[0]
+            embedding = self.model.encode([text])[0]
             
             # Normalize embedding for cosine similarity
             embedding = embedding / np.linalg.norm(embedding)
@@ -323,8 +321,7 @@ class EmbeddingService:
                 search_embedding = user_embedding
             elif query_text:
                 # Generate embedding for query
-                query_text_prefixed = f"query: {query_text}"
-                search_embedding = self.model.encode([query_text_prefixed])[0]
+                search_embedding = self.model.encode([query_text])[0]
             else:
                 logger.error("No query text, user embedding, or query embedding provided")
                 return []
@@ -547,8 +544,7 @@ class EmbeddingService:
     def encode_text(self, text: str) -> np.ndarray:
         """Encode text to embedding vector"""
         try:
-            query_text = f"query: {text}"
-            embedding = self.model.encode([query_text])[0]
+            embedding = self.model.encode([text])[0]
             return embedding
         except Exception as e:
             logger.error(f"Error encoding text: {str(e)}")
@@ -613,8 +609,7 @@ class EmbeddingService:
                 return None
             
             # Generate embedding
-            passage_text = f"passage: {text}"
-            embedding = self.model.encode([passage_text])[0]
+            embedding = self.model.encode([text])[0]
             
             # Cache the result
             content_dict["embedding_vector"] = embedding
@@ -711,7 +706,7 @@ class EmbeddingService:
             
             for emotion, query in emotional_queries.items():
                 # Generate embedding for emotional query
-                query_embedding = self.model.encode([f"query: {query}"])[0]
+                query_embedding = self.model.encode([query])[0]
                 query_embedding = query_embedding / np.linalg.norm(query_embedding)
                 
                 # Calculate similarity with user's emotional embedding
