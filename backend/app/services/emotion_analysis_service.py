@@ -9,7 +9,6 @@ from app.models.user_interaction import (
     UserRating, UserWatchlist, UserRecommendation, UserEmotionalProfile, RecommendationSelection
 )  # PostViewingFeedback kaldır
 from app.core.tmdb_service import TMDBServiceFactory
-from app.services.language_service import LanguageService
 
 logger = logging.getLogger(__name__)
 
@@ -18,15 +17,12 @@ class EmotionAnalysisService:
         self.db = db
         self.tmdb_service = TMDBServiceFactory.create_service()
         self.embedding_service = None
-        self.language_service = LanguageService()
     
     def analyze_user_emotion(self, emotion_text: str) -> Dict[str, Any]:
         try:
             self._ensure_embedding_service()
-            # Dil tespiti ve çeviri (giriş İngilizce değilse İngilizceye çevir)
-            lang = self.language_service.detect_language(emotion_text)
-            text_en = self.language_service.translate_to_english(emotion_text, lang)
-            emotion_embedding = self.embedding_service.encode_text(text_en)
+            # Model supports Turkish and 50+ languages natively - no translation needed
+            emotion_embedding = self.embedding_service.encode_text(emotion_text)
             similar_content = self.embedding_service.search_similar_content(
                 query_embedding=emotion_embedding,
                 top_k=10,
@@ -38,8 +34,7 @@ class EmotionAnalysisService:
                 "emotion_embedding": emotion_embedding.tolist(),
                 "similar_content_count": len(similar_content),
                 "emotional_profile": emotional_profile,
-                "confidence": min(1.0, len(similar_content) / 10.0),
-                "detected_language": lang
+                "confidence": min(1.0, len(similar_content) / 10.0)
             }
         except Exception as e:
             logger.error(f"Error analyzing user emotion: {str(e)}")

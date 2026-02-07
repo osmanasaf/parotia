@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Get DATABASE_URL from environment or use default
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg2://postgres:asdqwe123!.@localhost:5432/parotia_db")
+DATABASE_URL = os.getenv("DATABASE_URL") or "postgresql+psycopg2://postgres:asdqwe123!.@localhost:5432/parotia_db"
 
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

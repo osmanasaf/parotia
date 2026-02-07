@@ -17,7 +17,8 @@ class EmbeddingService:
     
     def __init__(self):
         self.settings = get_settings()
-        self.model_name = "all-MiniLM-L6-v2"
+        # Multilingual MiniLM model - fast and supports 50+ languages including Turkish
+        self.model_name = "paraphrase-multilingual-MiniLM-L12-v2"
         self.model = None
         self.index = None
         self.content_data = []

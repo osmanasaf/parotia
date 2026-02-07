@@ -16,7 +16,6 @@ from app.core.config import get_settings
 from app.services.embedding_service import EmbeddingService
 from app.services.emotion_analysis_service import EmotionAnalysisService
 from app.core.cache import CacheService
-from app.services.language_service import LanguageService
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +52,6 @@ class RecommendationService:
         # Initialize services
         self.embedding_service = EmbeddingService()
         self.emotion_service = EmotionAnalysisService(db)
-        self.language_service = LanguageService()
 
     # =========================================================================
     # YARDIMCI / ORTAK METODLAR (DRY & Performans)
@@ -189,13 +187,10 @@ class RecommendationService:
             if emotion_data.content_type == "all":
                 return self._get_emotion_based_recommendations_all(user_id, emotion_data)
             
-            # Dil tespiti & çeviri
-            src_lang = self.language_service.detect_language(emotion_data.emotion)
-            emo_text_en = self.language_service.translate_to_english(emotion_data.emotion, src_lang)
-            # Get emotion embedding or fallback to text (English)
-            emb = self._get_emotion_embedding(emo_text_en)
+            # Get emotion embedding (model supports Turkish and 50+ languages natively)
+            emb = self._get_emotion_embedding(emotion_data.emotion)
             recommendations = self._search_by_emotion_or_text(
-                emotion_data.content_type, emb, emo_text_en
+                emotion_data.content_type, emb, emotion_data.emotion
             )
             
             # Prepare candidate IDs (lazy)
@@ -255,12 +250,9 @@ class RecommendationService:
             # All türü için hem movie hem tv sonuçlarını birleştir
             if content_type == "all":
                 return self._get_emotion_based_recommendations_public_all(emotion_text, page)
-            # Dil tespiti & çeviri (public)
-            src_lang = self.language_service.detect_language(emotion_text)
-            emo_text_en = self.language_service.translate_to_english(emotion_text, src_lang)
-            # Get current emotion embedding
-            emb = self._get_emotion_embedding(emo_text_en)
-            recommendations = self._search_by_emotion_or_text(content_type, emb, emo_text_en)
+            # Get current emotion embedding (model supports Turkish and 50+ languages natively)
+            emb = self._get_emotion_embedding(emotion_text)
+            recommendations = self._search_by_emotion_or_text(content_type, emb, emotion_text)
 
             seen_tmdb_ids = set()
             exclude_ids = set(exclude_tmdb_ids or [])
@@ -310,10 +302,8 @@ class RecommendationService:
     def _get_emotion_based_recommendations_public_all(self, emotion_text: str, page: int) -> Dict[str, Any]:
         """Public all: movie ve tv adaylarını birleştirip 9'luk sayfa döndürür."""
         try:
-            # 1) Emotion embedding veya text kullan
-            src_lang = self.language_service.detect_language(emotion_text)
-            emo_text_en = self.language_service.translate_to_english(emotion_text, src_lang)
-            emb = self._get_emotion_embedding(emo_text_en)
+            # 1) Emotion embedding (model supports Turkish and 50+ languages natively)
+            emb = self._get_emotion_embedding(emotion_text)
 
             # 2) Her tür için arama yap
             def search_for_type(ct: str):
