@@ -1,4 +1,5 @@
 import logging
+import random
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 from typing import List, Optional, Dict, Any
@@ -24,9 +25,9 @@ logger = logging.getLogger(__name__)
 PAGE_SIZE = 9
 MAX_PAGES = 5
 MAX_RECOMMENDATIONS = PAGE_SIZE * MAX_PAGES  # 45
-EMBEDDING_TOP_K = 80
+EMBEDDING_TOP_K = 200
 MIN_VOTE_AVERAGE = 6.0
-MIN_VOTE_COUNT = 1000
+MIN_VOTE_COUNT = 200
 DETAILS_FETCH_CHUNK = PAGE_SIZE * 2
 
 class RecommendationService:
@@ -58,28 +59,54 @@ class RecommendationService:
     # =========================================================================
 
     def _get_emotion_embedding(self, text: str) -> Optional[np.ndarray]:
-        analysis = self.emotion_service.analyze_user_emotion(text)
-        embedding = analysis.get("emotion_embedding", [])
-        if embedding:
-            try:
-                return np.array(embedding)
-            except Exception:
-                return None
-        return None
+        """Encode emotion text directly — avoids the redundant FAISS search
+        that EmotionAnalysisService.analyze_user_emotion performs."""
+        try:
+            embedding = self.embedding_service.model.encode([text])[0]
+            embedding = embedding / np.linalg.norm(embedding)
+            return embedding
+        except Exception:
+            return None
 
     def _search_by_emotion_or_text(self, content_type: str, emotion_embedding: Optional[np.ndarray], text: str):
         if emotion_embedding is not None:
-            return self.embedding_service.search_similar_content(
+            results = self.embedding_service.search_similar_content(
                 query_text="",
                 top_k=EMBEDDING_TOP_K,
                 content_type=content_type,
                 query_embedding=emotion_embedding,
             )
-        return self.embedding_service.search_similar_content(
-            query_text=text,
-            top_k=EMBEDDING_TOP_K,
-            content_type=content_type,
-        )
+        else:
+            results = self.embedding_service.search_similar_content(
+                query_text=text,
+                top_k=EMBEDDING_TOP_K,
+                content_type=content_type,
+            )
+        return self._shuffle_within_score_bands(results)
+
+    @staticmethod
+    def _shuffle_within_score_bands(results: List[Dict[str, Any]], band_size: float = 0.02) -> List[Dict[str, Any]]:
+        """Shuffle items that have very similar scores to add variety."""
+        if not results:
+            return results
+        bands: List[List[Dict[str, Any]]] = []
+        current_band: List[Dict[str, Any]] = []
+        band_anchor: float = results[0].get("similarity_score", 0.0)
+        for item in results:
+            score = item.get("similarity_score", 0.0)
+            if abs(score - band_anchor) <= band_size:
+                current_band.append(item)
+            else:
+                bands.append(current_band)
+                current_band = [item]
+                band_anchor = score
+        if current_band:
+            bands.append(current_band)
+        shuffled: List[Dict[str, Any]] = []
+        for band in bands:
+            random.shuffle(band)
+            shuffled.extend(band)
+        return shuffled
 
     def _fetch_details(self, content_type: str, tmdb_id: int) -> Optional[Dict[str, Any]]:
         if content_type == "movie":
@@ -100,7 +127,7 @@ class RecommendationService:
             "poster_path": content_data.get("poster_path"),
             "release_date": content_data.get("release_date") or content_data.get("first_air_date"),
             "vote_average": content_data.get("vote_average", 0),
-            "similarity_score": float(similarity_score),
+            "similarity_score": round(float(similarity_score) * 100),
             "rank": current_len + 1,
         }
 
@@ -117,7 +144,7 @@ class RecommendationService:
                 data = self._fetch_details(content_type, tmdb_id)
                 if not data:
                     return idx, None, None, None
-                if data.get("vote_average", 0) < MIN_VOTE_AVERAGE or data.get("vote_count", 0) < MIN_VOTE_COUNT:
+                if data.get("vote_average", 0) < MIN_VOTE_AVERAGE:
                     return idx, None, None, None
                 return idx, tmdb_id, sim_score, data
 
@@ -158,7 +185,7 @@ class RecommendationService:
             def _job(idx: int):
                 tmdb_id, sim_score, ct = candidate_ids[idx]
                 data = self._fetch_details(ct, tmdb_id)
-                if not data or data.get("vote_average", 0) < MIN_VOTE_AVERAGE or data.get("vote_count", 0) < MIN_VOTE_COUNT:
+                if not data or data.get("vote_average", 0) < MIN_VOTE_AVERAGE:
                     return idx, None, None, None, None
                 return idx, tmdb_id, sim_score, ct, data
 
@@ -551,7 +578,7 @@ class RecommendationService:
                             "poster_path": content_data.get("poster_path"),
                             "release_date": content_data.get("release_date"),
                             "vote_average": vote_average,
-                            "similarity_score": float(rec.get("similarity_score", 0.0)),
+                            "similarity_score": round(float(rec.get("similarity_score", 0.0)) * 100),
                             "rank": len(clean_recommendations) + 1
                         }
                         clean_recommendations.append(clean_rec)
@@ -659,7 +686,7 @@ class RecommendationService:
                             "poster_path": content_data.get("poster_path"),
                             "release_date": content_data.get("release_date"),
                             "vote_average": vote_average,
-                            "similarity_score": float(rec.get("similarity_score", 0.0)),
+                            "similarity_score": round(float(rec.get("similarity_score", 0.0)) * 100),
                             "rank": len(clean_recommendations) + 1
                         }
                         clean_recommendations.append(clean_rec)

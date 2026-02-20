@@ -185,6 +185,11 @@ class EmbeddingService:
             if not content.get('content_type'):
                 content['content_type'] = 'movie' if content.get('title') else 'tv'
 
+            # Skip if already indexed (prevents duplicates on re-populate)
+            ct = content['content_type']
+            if any(c.get('tmdb_id') == tmdb_id and c.get('content_type') == ct for c in self.content_data):
+                return False
+
             # Filter out low-rated content (IMDB 6.0 altı)
             vote_average = content.get('vote_average', 0)
             if vote_average < 6.0:
@@ -193,7 +198,7 @@ class EmbeddingService:
 
             # Enforce minimum vote_count threshold for embedding quality
             vote_count = content.get('vote_count', 0)
-            if vote_count < 1000:
+            if vote_count < 200:
                 logger.info(
                     f"Skipping low-vote-count content {content.get('tmdb_id')} (vote_count: {vote_count})"
                 )
@@ -250,7 +255,7 @@ class EmbeddingService:
 
             # Enforce minimum vote_count threshold
             vote_count = content.get('vote_count', 0)
-            if vote_count < 1000:
+            if vote_count < 200:
                 logger.info(
                     f"Skipping low-vote-count content {content.get('tmdb_id')} from database (vote_count: {vote_count})"
                 )
