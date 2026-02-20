@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, BackgroundTasks
 from sqlalchemy.orm import Session
 from typing import List, Optional
 
@@ -133,6 +133,14 @@ def get_movie_details_with_similar_public(
 ):
     """Detay + similar içerikler (public: token yok)."""
     try:
+        from app.core.cache import CacheService
+        cache_service = CacheService()
+        cache_key = f"tmdb:movie:{tmdb_id}:details_similar_public"
+        
+        cached_result = cache_service.get_json(cache_key)
+        if cached_result:
+            return cached_result
+
         movie_service = MovieService(db)
         detail_result = movie_service.get_movie_details(tmdb_id)
         if not detail_result["success"]:
@@ -146,13 +154,18 @@ def get_movie_details_with_similar_public(
             overview_text, content_type="movie", exclude_tmdb_ids={tmdb_id}
         )
 
-        return {
+        response_data = {
             "success": True,
             "data": {
                 "detail": detail,
                 "similar": similar.get("data", {}).get("recommendations", [])
             }
         }
+        
+        # Cache for 24 hours (86400 seconds)
+        cache_service.set_json(cache_key, response_data, 86400)
+        
+        return response_data
     except HTTPException:
         raise
     except Exception as e:
@@ -181,6 +194,7 @@ def get_movie_watch_providers(
 @router.post("/rate", response_model=UserRatingResponse)
 def rate_movie(
     rating_data: UserRatingCreate,
+    background_tasks: BackgroundTasks,
     current_user_id: int = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -188,9 +202,10 @@ def rate_movie(
         movie_service = MovieService(db)
         rating = movie_service.rate_movie(current_user_id, rating_data)
         
-        # Update emotion profile in real-time
+        # Update emotion profile in background to avoid blocking the API response
         emotion_service = EmotionAnalysisService(db)
-        emotion_service.update_user_emotion_profile_realtime(
+        background_tasks.add_task(
+            emotion_service.update_user_emotion_profile_realtime,
             current_user_id, 
             rating_data.tmdb_id, 
             rating_data.rating, 
@@ -246,6 +261,7 @@ def get_my_movie_watchlist(
 @router.put("/watchlist/{tmdb_id}")
 def update_movie_watchlist_status(
     tmdb_id: int,
+    background_tasks: BackgroundTasks,
     status: str = Query(..., description="New status ('to_watch', 'watching', 'completed')"),
     current_user_id: int = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -255,10 +271,11 @@ def update_movie_watchlist_status(
         item = movie_service.update_movie_watchlist_status(current_user_id, tmdb_id, status)
         
         if item:
-            # If status is completed, update emotion profile
+            # If status is completed, update emotion profile in background
             if status == "completed":
                 emotion_service = EmotionAnalysisService(db)
-                emotion_service.update_user_emotion_profile_realtime(
+                background_tasks.add_task(
+                    emotion_service.update_user_emotion_profile_realtime,
                     current_user_id, 
                     tmdb_id, 
                     7.0,  # Default rating for completed items

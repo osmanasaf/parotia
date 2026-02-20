@@ -13,9 +13,20 @@ from sqlalchemy.orm import Session
 logger = logging.getLogger(__name__)
 
 class EmbeddingService:
-    """Service for generating and managing content embeddings"""
+    """Service for generating and managing content embeddings (Singleton)"""
+    _instance = None
+    
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            cls._instance = super(EmbeddingService, cls).__new__(cls)
+            cls._instance._is_initialized = False
+        return cls._instance
     
     def __init__(self):
+        # Only initialize once
+        if getattr(self, '_is_initialized', False):
+            return
+            
         self.settings = get_settings()
         # Multilingual MiniLM model - fast and supports 50+ languages including Turkish
         self.model_name = "paraphrase-multilingual-MiniLM-L12-v2"
@@ -29,6 +40,7 @@ class EmbeddingService:
         
         self._load_model()
         self._load_or_create_index()
+        self._is_initialized = True
     
     def _load_model(self):
         """Load the sentence transformer model"""

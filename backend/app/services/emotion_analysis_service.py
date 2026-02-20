@@ -486,7 +486,7 @@ class EmotionAnalysisService:
             self._update_emotional_characteristics_realtime(profile, tmdb_id, content_type, rating)
             
             # Update success metrics
-            profile.total_watched_movies += 1
+            # Update success metrics (already incremented total_watched_movies in _update_profile_embedding)
             profile.profile_confidence = min(1.0, profile.total_watched_movies / 20.0)
             
             # Update learning rate (simplified)
@@ -557,7 +557,7 @@ class EmotionAnalysisService:
             for genre in genre_names:
                 if genre in profile.preferred_genres:
                     profile.preferred_genres[genre] += rating / 10.0
-            else:
+                else:
                     profile.preferred_genres[genre] = rating / 10.0
             
             # Update emotional tendencies based on content characteristics

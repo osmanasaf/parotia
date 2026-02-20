@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, BackgroundTasks
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from app.db import get_db
@@ -9,6 +9,7 @@ from app.schemas.movie import (
     UserRatingCreate, UserRatingResponse, UserWatchlistCreate, UserWatchlistResponse, UserWatchlistWithRatingResponse
 )
 from app.services.recommendation_service import RecommendationService
+from app.services.emotion_analysis_service import EmotionAnalysisService
 
 router = APIRouter(prefix="/tv", tags=["tv"])
 
@@ -109,6 +110,14 @@ def get_tv_details_with_similar_public(
 ):
     """Detay + similar içerikler (public: token yok)."""
     try:
+        from app.core.cache import CacheService
+        cache_service = CacheService()
+        cache_key = f"tmdb:tv:{tmdb_id}:details_similar_public"
+        
+        cached_result = cache_service.get_json(cache_key)
+        if cached_result:
+            return cached_result
+
         tv_service = TVService(db)
         detail_result = tv_service.get_tv_show_details(tmdb_id)
         if not detail_result["success"]:
@@ -122,13 +131,18 @@ def get_tv_details_with_similar_public(
             overview_text, content_type="tv", exclude_tmdb_ids={tmdb_id}
         )
 
-        return {
+        response_data = {
             "success": True,
             "data": {
                 "detail": detail,
                 "similar": similar.get("data", {}).get("recommendations", [])
             }
         }
+        
+        # Cache for 24 hours (86400 seconds)
+        cache_service.set_json(cache_key, response_data, 86400)
+        
+        return response_data
     except HTTPException:
         raise
     except Exception as e:
@@ -159,6 +173,7 @@ def search_tv_shows(
 @router.post("/rate", response_model=UserRatingResponse)
 def rate_tv_show(
     rating_data: UserRatingCreate,
+    background_tasks: BackgroundTasks,
     current_user_id: int = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -166,6 +181,17 @@ def rate_tv_show(
     try:
         tv_service = TVService(db)
         rating = tv_service.rate_tv_show(current_user_id, rating_data)
+        
+        # Update emotion profile in background
+        emotion_service = EmotionAnalysisService(db)
+        background_tasks.add_task(
+            emotion_service.update_user_emotion_profile_realtime,
+            current_user_id, 
+            rating_data.tmdb_id, 
+            rating_data.rating, 
+            rating_data.content_type
+        )
+        
         return rating
     except Exception as e:
         raise handle_exception(e)
@@ -218,6 +244,7 @@ def get_my_tv_watchlist(
 @router.put("/watchlist/{tmdb_id}")
 def update_tv_watchlist_status(
     tmdb_id: int,
+    background_tasks: BackgroundTasks,
     status: str = Query(..., description="New status ('to_watch', 'watching', 'completed')"),
     current_user_id: int = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -228,6 +255,17 @@ def update_tv_watchlist_status(
         item = tv_service.update_tv_watchlist_status(current_user_id, tmdb_id, status)
         
         if item:
+            # If status is completed, update emotion profile in background
+            if status == "completed":
+                emotion_service = EmotionAnalysisService(db)
+                background_tasks.add_task(
+                    emotion_service.update_user_emotion_profile_realtime,
+                    current_user_id, 
+                    tmdb_id, 
+                    7.0,  # Default rating for completed items
+                    "tv"
+                )
+            
             return item
         else:
             raise HTTPException(

@@ -26,6 +26,10 @@ class UserRatingRepository(BaseRepository[UserRating]):
     
     def create_or_update_rating(self, user_id: int, tmdb_id: int, content_type: str, rating: int, comment: Optional[str] = None) -> UserRating:
         """Create or update user rating"""
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"Saving rating for user {user_id}, tmdb {tmdb_id}, content {content_type}, rating {rating}, comment '{comment}'")
+        
         existing_rating = self.get_user_rating(user_id, tmdb_id, content_type)
         
         if existing_rating:
