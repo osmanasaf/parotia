@@ -18,7 +18,7 @@ class EmailService:
     def send_verification_email(self, user_email: str, username: str, verification_code: str) -> bool:
         """Send verification email to user"""
         try:
-            subject = "Email Verification Code - Parotia"
+            subject = "Email Verification Code - movAi"
             body = self._create_verification_email_body(username, verification_code)
             
             success = self.email_sender.send_email(
@@ -97,7 +97,7 @@ class EmailService:
     def send_email_change_verification(self, new_email: str, username: str, verification_code: str) -> bool:
         """E‑posta değişimi için doğrulama e‑postası gönderir"""
         try:
-            subject = "Email Change Verification Code - Parotia"
+            subject = "Email Change Verification - movAi"
             body = self._create_email_change_email_body(username, verification_code, new_email)
 
             success = self.email_sender.send_email(
@@ -134,7 +134,7 @@ class EmailService:
     def send_password_reset_email(self, user_email: str, username: str, verification_code: str) -> bool:
         """Şifre sıfırlama kodunu içeren e‑postayı gönderir"""
         try:
-            subject = "Password Reset Code - Parotia"
+            subject = "Password Reset Code - movAi"
             body = self._create_password_reset_email_body(username, verification_code)
 
             success = self.email_sender.send_email(
@@ -150,55 +150,88 @@ class EmailService:
             return True
         except Exception as e:
             raise EmailServiceException(f"Error sending password reset email: {str(e)}")
-    
+
+    # =========================================================================
+    # EMAIL HTML TEMPLATES
+    # =========================================================================
+
+    def _email_wrapper(self, content: str) -> str:
+        """Shared modern email wrapper with movAi branding."""
+        return f"""\
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
+<body style="margin:0;padding:0;background-color:#0f0f1a;font-family:'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#0f0f1a;padding:40px 0;">
+<tr><td align="center">
+<table role="presentation" width="520" cellpadding="0" cellspacing="0" style="background:linear-gradient(145deg,#1a1a2e 0%,#16213e 100%);border-radius:16px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,0.5);">
+
+<!-- Header -->
+<tr><td style="padding:36px 40px 24px;text-align:center;border-bottom:1px solid rgba(255,255,255,0.06);">
+<h1 style="margin:0;font-size:28px;font-weight:700;letter-spacing:1px;">
+<span style="color:#a78bfa;">mov</span><span style="color:#ffffff;">Ai</span>
+</h1>
+</td></tr>
+
+<!-- Body -->
+<tr><td style="padding:32px 40px;">
+{content}
+</td></tr>
+
+<!-- Footer -->
+<tr><td style="padding:24px 40px 32px;text-align:center;border-top:1px solid rgba(255,255,255,0.06);">
+<a href="https://movai.tr" style="color:#a78bfa;text-decoration:none;font-size:13px;font-weight:600;letter-spacing:0.5px;">movAi.tr</a>
+<p style="margin:8px 0 0;color:#64748b;font-size:11px;">&copy; {datetime.now().year} movAi. All rights reserved.</p>
+</td></tr>
+
+</table>
+</td></tr>
+</table>
+</body>
+</html>"""
+
+    def _code_block(self, code: str) -> str:
+        """Glassmorphism-style verification code block."""
+        return f"""\
+<div style="background:rgba(167,139,250,0.08);border:1px solid rgba(167,139,250,0.25);border-radius:12px;padding:24px;text-align:center;margin:24px 0;">
+<span style="font-size:36px;font-weight:700;letter-spacing:12px;color:#a78bfa;font-family:'Courier New',monospace;">{code}</span>
+</div>
+<p style="text-align:center;color:#94a3b8;font-size:12px;margin:4px 0 0;">This code expires in {self.settings.VERIFICATION_CODE_EXPIRE_MINUTES} minutes</p>"""
+
     def _create_verification_email_body(self, username: str, verification_code: str) -> str:
-        """Create HTML email body"""
-        return f"""
-        <html>
-        <body>
-            <h2>Welcome to Parotia, {username}!</h2>
-            <p>Thank you for registering. Please verify your email address using the verification code below:</p>
-            <div style="background-color: #f4f4f4; padding: 20px; text-align: center; border-radius: 8px; margin: 20px 0;">
-                <h1 style="color: #333; font-size: 32px; letter-spacing: 8px; margin: 0;">{verification_code}</h1>
-            </div>
-            <p>This code will expire in {self.settings.VERIFICATION_CODE_EXPIRE_MINUTES} minutes.</p>
-            <p>If you didn't create an account, please ignore this email.</p>
-            <br>
-            <p>Best regards,<br>The Parotia Team</p>
-        </body>
-        </html>
-        """ 
+        content = f"""\
+<h2 style="margin:0 0 8px;color:#ffffff;font-size:20px;font-weight:600;">Welcome, {username}!</h2>
+<p style="color:#94a3b8;font-size:14px;line-height:1.6;margin:0 0 4px;">
+Thank you for joining <strong style="color:#a78bfa;">movAi</strong>. Please verify your email address using the code below.
+</p>
+{self._code_block(verification_code)}
+<p style="color:#64748b;font-size:12px;line-height:1.5;margin:16px 0 0;">
+If you didn't create an account, you can safely ignore this email.
+</p>"""
+        return self._email_wrapper(content)
 
     def _create_email_change_email_body(self, username: str, verification_code: str, new_email: str) -> str:
-        return f"""
-        <html>
-        <body>
-            <h2>Hello {username},</h2>
-            <p>We received a request to change your email to <b>{new_email}</b>. Use the verification code below to confirm this change:</p>
-            <div style=\"background-color: #f4f4f4; padding: 20px; text-align: center; border-radius: 8px; margin: 20px 0;\">
-                <h1 style=\"color: #333; font-size: 32px; letter-spacing: 8px; margin: 0;\">{verification_code}</h1>
-            </div>
-            <p>This code will expire in {self.settings.VERIFICATION_CODE_EXPIRE_MINUTES} minutes.</p>
-            <p>If you did not request this change, you can safely ignore this email.</p>
-            <br>
-            <p>Best regards,<br>The Parotia Team</p>
-        </body>
-        </html>
-        """
+        content = f"""\
+<h2 style="margin:0 0 8px;color:#ffffff;font-size:20px;font-weight:600;">Email Change Request</h2>
+<p style="color:#94a3b8;font-size:14px;line-height:1.6;margin:0 0 4px;">
+Hi <strong style="color:#ffffff;">{username}</strong>, we received a request to change your email to
+<strong style="color:#a78bfa;">{new_email}</strong>. Use the code below to confirm.
+</p>
+{self._code_block(verification_code)}
+<p style="color:#64748b;font-size:12px;line-height:1.5;margin:16px 0 0;">
+If you did not request this change, you can safely ignore this email.
+</p>"""
+        return self._email_wrapper(content)
 
     def _create_password_reset_email_body(self, username: str, verification_code: str) -> str:
-        return f"""
-        <html>
-        <body>
-            <h2>Hello {username},</h2>
-            <p>We received a request to reset your password. Use the verification code below to complete the process:</p>
-            <div style=\"background-color: #f4f4f4; padding: 20px; text-align: center; border-radius: 8px; margin: 20px 0;\">
-                <h1 style=\"color: #333; font-size: 32px; letter-spacing: 8px; margin: 0;\">{verification_code}</h1>
-            </div>
-            <p>This code will expire in {self.settings.VERIFICATION_CODE_EXPIRE_MINUTES} minutes.</p>
-            <p>If you did not request a password reset, please ignore this email.</p>
-            <br>
-            <p>Best regards,<br>The Parotia Team</p>
-        </body>
-        </html>
-        """
+        content = f"""\
+<h2 style="margin:0 0 8px;color:#ffffff;font-size:20px;font-weight:600;">Password Reset</h2>
+<p style="color:#94a3b8;font-size:14px;line-height:1.6;margin:0 0 4px;">
+Hi <strong style="color:#ffffff;">{username}</strong>, we received a request to reset your password.
+Use the code below to proceed.
+</p>
+{self._code_block(verification_code)}
+<p style="color:#64748b;font-size:12px;line-height:1.5;margin:16px 0 0;">
+If you did not request a password reset, please ignore this email.
+</p>"""
+        return self._email_wrapper(content)
