@@ -59,11 +59,14 @@ class RecommendationService:
     # =========================================================================
 
     def _get_emotion_embedding(self, text: str) -> Optional[np.ndarray]:
-        """Encode emotion text directly — avoids the redundant FAISS search
-        that EmotionAnalysisService.analyze_user_emotion performs."""
+        """Encode emotion text directly using EmbeddingService (now cached)."""
         try:
-            embedding = self.embedding_service.model.encode([text])[0]
-            embedding = embedding / np.linalg.norm(embedding)
+            embedding = self.embedding_service.encode_text(text)
+            if embedding.size == 0:
+                return None
+            norm = np.linalg.norm(embedding)
+            if norm > 0:
+                embedding = embedding / norm
             return embedding
         except Exception:
             return None
@@ -208,12 +211,20 @@ class RecommendationService:
     # ============================================================================
 
     def get_emotion_based_recommendations(self, user_id: int, emotion_data: EmotionBasedRecommendation) -> Dict[str, Any]:
-        """Kullanıcının anlık duygu durumuna göre öneriler."""
+        """Kullanıcının anlık duygu durumuna göre öneriler (Redis Önbellekli)."""
         try:
             # Handle "all" content type
             if emotion_data.content_type == "all":
                 return self._get_emotion_based_recommendations_all(user_id, emotion_data)
             
+            # 1. Check Redis Cache
+            page = getattr(emotion_data, "page", 1)
+            cache_key = f"rec:emotion:{user_id}:{emotion_data.emotion}:{emotion_data.content_type}:p{page}"
+            cached_result = self.cache.get_json(cache_key)
+            if cached_result:
+                logger.info(f"Returning cached emotion recommendations for user {user_id}")
+                return cached_result
+
             # Get emotion embedding (model supports Turkish and 50+ languages natively)
             emb = self._get_emotion_embedding(emotion_data.emotion)
             recommendations = self._search_by_emotion_or_text(
@@ -250,7 +261,7 @@ class RecommendationService:
                 },
             )
             
-            return {
+            final_result = {
                 "success": True,
                 "data": {
                     "recommendations": clean_recommendations,
@@ -263,6 +274,9 @@ class RecommendationService:
                     "method": "current_emotion"
                 }
             }
+            # 2. Save to Cache (5 minutes TTL)
+            self.cache.set_json(cache_key, final_result, 300)
+            return final_result
         except Exception as e:
             logger.error(f"Error getting emotion-based recommendations: {str(e)}")
             return {"success": False, "error": str(e)}
@@ -272,11 +286,18 @@ class RecommendationService:
     # ============================================================================
 
     def get_emotion_based_recommendations_public(self, emotion_text: str, content_type: str = "movie", exclude_tmdb_ids: Optional[set] = None, page: int = 1) -> Dict[str, Any]:
-        """Token gerektirmeyen, anlık duygu metnine göre öneriler."""
+        """Token gerektirmeyen, anlık duygu metnine göre öneriler (Redis Önbellekli)."""
         try:
             # All türü için hem movie hem tv sonuçlarını birleştir
             if content_type == "all":
                 return self._get_emotion_based_recommendations_public_all(emotion_text, page)
+            
+            # 1. Önbellek Kontrolü (Public sonuçlar paylaşımlıdır, user_id içermez)
+            cache_key = f"rec:public:emotion:{emotion_text}:{content_type}:p{page}"
+            cached = self.cache.get_json(cache_key)
+            if cached:
+                return cached
+
             # Get current emotion embedding (model supports Turkish and 50+ languages natively)
             emb = self._get_emotion_embedding(emotion_text)
             recommendations = self._search_by_emotion_or_text(content_type, emb, emotion_text)
@@ -309,7 +330,7 @@ class RecommendationService:
                 content_type,
             )
 
-            return {
+            final_result = {
                 "success": True,
                 "data": {
                     "recommendations": clean_recommendations,
@@ -322,6 +343,8 @@ class RecommendationService:
                     "method": "emotion_public"
                 }
             }
+            self.cache.set_json(cache_key, final_result, 600)  # 10 dakikalık public cache
+            return final_result
         except Exception as e:
             logger.error(f"Error getting public emotion-based recommendations: {str(e)}")
             return {"success": False, "error": str(e)}
@@ -376,13 +399,20 @@ class RecommendationService:
             logger.error(f"Error getting public emotion-based recommendations (all): {str(e)}")
             return {"success": False, "error": str(e)}
 
-    def get_hybrid_recommendations(self, user_id: int, emotion_text: str, content_type: str = "movie", exclude_tmdb_ids: Optional[set] = None) -> Dict[str, Any]:
-        """Hibrit öneriler: anlık duygu + geçmiş profil birleşimi."""
+    def get_hybrid_recommendations(self, user_id: int, emotion_text: str, content_type: str = "movie", page: int = 1, exclude_tmdb_ids: Optional[set] = None) -> Dict[str, Any]:
+        """Hibrit öneriler: anlık duygu + geçmiş profil birleşimi (Redis Önbellekli)."""
         try:
             # Handle "all" content type
             if content_type == "all":
-                return self._get_hybrid_recommendations_all(user_id, emotion_text)
+                return self._get_hybrid_recommendations_all(user_id, emotion_text, page)
             
+            # 1. Check Redis Cache
+            cache_key = f"rec:hybrid:{user_id}:{emotion_text}:{content_type}:p{page}"
+            cached_result = self.cache.get_json(cache_key)
+            if cached_result:
+                logger.info(f"Returning cached hybrid recommendations for user {user_id}")
+                return cached_result
+
             # Get user's cached emotion profile (fast access)
             user_emotion = self.emotion_service.get_cached_user_emotion_profile(user_id, content_type)
             user_emotion_embedding = user_emotion.get("emotion_embedding", [])
@@ -420,12 +450,13 @@ class RecommendationService:
                                   user_emotion_array * user_weight)
                 
                 # Search using hybrid embedding
-                recommendations = self.embedding_service.search_similar_content(
+                raw_recommendations = self.embedding_service.search_similar_content(
                     query_text="",
                     top_k=EMBEDDING_TOP_K,
                     content_type=content_type,
                     query_embedding=hybrid_embedding
                 )
+                recommendations = self._shuffle_within_score_bands(raw_recommendations)
             else:
                 # Fallback to emotion-based search
                 if emotion_embedding:
@@ -451,7 +482,7 @@ class RecommendationService:
             candidate_ids.sort(key=lambda x: x[1], reverse=True)
 
             # Pagination indices (from router) with stable PAGE_SIZE
-            page = getattr(self, "_page", 1)
+            page = min(max(page, 1), MAX_PAGES) # Ensure page is within valid range
             clean_recommendations = self._stable_page_enrich_single(
                 candidate_ids,
                 page,
@@ -463,7 +494,7 @@ class RecommendationService:
                 },
             )
             
-            return {
+            final_result = {
                 "success": True,
                 "data": {
                     "recommendations": clean_recommendations,
@@ -482,6 +513,9 @@ class RecommendationService:
                     }
                 }
             }
+            # 2. Save to Cache (5 minutes TTL)
+            self.cache.set_json(cache_key, final_result, 300)
+            return final_result
         except Exception as e:
             logger.error(f"Error getting hybrid recommendations: {str(e)}")
             return {"success": False, "error": str(e)}
@@ -727,45 +761,99 @@ class RecommendationService:
     # YARDIMCI METODLAR
     # ============================================================================
 
-    def _get_hybrid_recommendations_all(self, user_id: int, emotion_text: str) -> Dict[str, Any]:
-        """Hybrid önerileri her iki tür için getirir."""
+    def _get_hybrid_recommendations_all(self, user_id: int, emotion_text: str, page: int = 1) -> Dict[str, Any]:
+        """Hybrid önerileri her iki tür için getirir ve sayfalar."""
         try:
-            # Get recommendations for both content types
-            movie_result = self.get_hybrid_recommendations(user_id, emotion_text, "movie")
-            tv_result = self.get_hybrid_recommendations(user_id, emotion_text, "tv")
+            user_emotion = self.emotion_service.get_cached_user_emotion_profile(user_id, "movie")
+            user_emotion_embedding = user_emotion.get("emotion_embedding", [])
             
-            # Combine results
-            all_recommendations = []
+            emotion_analysis = self.emotion_service.analyze_user_emotion(emotion_text)
+            emotion_embedding = emotion_analysis.get("emotion_embedding", [])
             
-            if movie_result["success"] and "data" in movie_result:
-                all_recommendations.extend(movie_result["data"]["recommendations"])
+            if not user_emotion_embedding:
+                return self._get_emotion_based_recommendations_all(
+                    user_id, EmotionBasedRecommendation(emotion=emotion_text, content_type="all", page=page)
+                )
+
+            # Weight combination
+            if emotion_embedding and user_emotion_embedding:
+                emotion_weight = 0.7
+                user_weight = 0.3
+                hybrid_embedding = (np.array(emotion_embedding) * emotion_weight + np.array(user_emotion_embedding) * user_weight)
+                
+                movie_recs = self.embedding_service.search_similar_content("", EMBEDDING_TOP_K, "movie", hybrid_embedding)
+                tv_recs = self.embedding_service.search_similar_content("", EMBEDDING_TOP_K, "tv", hybrid_embedding)
+            else:
+                movie_recs = self.embedding_service.search_similar_content(emotion_text, EMBEDDING_TOP_K, "movie")
+                tv_recs = self.embedding_service.search_similar_content(emotion_text, EMBEDDING_TOP_K, "tv")
+
+            # Shuffle and combine
+            movie_recs = self._shuffle_within_score_bands(movie_recs)
+            tv_recs = self._shuffle_within_score_bands(tv_recs)
             
-            if tv_result["success"] and "data" in tv_result:
-                all_recommendations.extend(tv_result["data"]["recommendations"])
+            user_ratings_movie = self.rating_repo.get_user_ratings(user_id, "movie")
+            user_ratings_tv = self.rating_repo.get_user_ratings(user_id, "tv")
+            watched_movie_ids = {rating.tmdb_id for rating in user_ratings_movie}
+            watched_tv_ids = {rating.tmdb_id for rating in user_ratings_tv}
+
+            candidate_ids_movie = [(rec.get("tmdb_id"), rec.get("similarity_score", 0.0), "movie") 
+                                 for rec in movie_recs if rec.get("tmdb_id") not in watched_movie_ids]
+            candidate_ids_tv = [(rec.get("tmdb_id"), rec.get("similarity_score", 0.0), "tv") 
+                              for rec in tv_recs if rec.get("tmdb_id") not in watched_tv_ids]
+
+            all_candidates = candidate_ids_movie + candidate_ids_tv
+            all_candidates.sort(key=lambda x: x[1], reverse=True)
             
-            # Sort by similarity score and take top 10
-            all_recommendations.sort(key=lambda x: x["similarity_score"], reverse=True)
-            top_recommendations = all_recommendations[:10]
+            # Apply pagination
+            page = min(max(page, 1), MAX_PAGES)
+            start = (page - 1) * PAGE_SIZE
+            clean = []
             
-            # Calculate breakdown
-            movie_count = len([r for r in top_recommendations if r["content_type"] == "movie"])
-            tv_count = len([r for r in top_recommendations if r["content_type"] == "tv"])
-            
+            i = start
+            while i < len(all_candidates) and len(clean) < PAGE_SIZE:
+                end = min(i + DETAILS_FETCH_CHUNK, len(all_candidates))
+                
+                def _job(idx: int):
+                    tmdb_id, sim_score, c_type = all_candidates[idx]
+                    data = self._fetch_details(c_type, tmdb_id)
+                    if not data or data.get("vote_average", 0) < MIN_VOTE_AVERAGE:
+                        return idx, None, None, None, None
+                    return idx, tmdb_id, sim_score, data, c_type
+
+                with ThreadPoolExecutor(max_workers=8) as pool:
+                    results = list(pool.map(_job, range(i, end)))
+
+                for idx, tmdb_id, sim_score, data, c_type in sorted(results, key=lambda x: x[0]):
+                    if data is None: continue
+                    clean_rec = self._build_clean_rec(tmdb_id, c_type, data, sim_score, len(clean))
+                    clean.append(clean_rec)
+                    try:
+                        self.recommendation_repo.save_recommendation(
+                            user_id=user_id, tmdb_id=tmdb_id, content_type=c_type,
+                            recommendation_type="hybrid", emotion_state=emotion_text, score=sim_score
+                        )
+                    except Exception: pass
+                    if len(clean) >= PAGE_SIZE: break
+                
+                i = end
+
+            movie_count = len([r for r in clean if r["content_type"] == "movie"])
+            tv_count = len([r for r in clean if r["content_type"] == "tv"])
+
             return {
                 "success": True,
                 "data": {
-                    "recommendations": top_recommendations,
+                    "recommendations": clean,
                     "emotion": emotion_text,
                     "content_type": "all",
-                    "total": len(top_recommendations),
-                    "breakdown": {
-                        "movies": movie_count,
-                        "tv_shows": tv_count
-                    },
+                    "total": len(all_candidates),
+                    "page": page,
+                    "page_size": PAGE_SIZE,
+                    "total_pages": min((len(all_candidates) + PAGE_SIZE - 1) // PAGE_SIZE, MAX_PAGES),
+                    "breakdown": {"movies": movie_count, "tv_shows": tv_count},
                     "recommendation_type": "hybrid_all"
                 }
             }
-            
         except Exception as e:
             logger.error(f"Error getting hybrid recommendations for all content types: {str(e)}")
             return {"success": False, "error": str(e)}

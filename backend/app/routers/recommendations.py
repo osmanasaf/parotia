@@ -222,12 +222,11 @@ def get_hybrid_recommendations(
     """
     try:
         recommendation_service = RecommendationService(db)
-        # Servise page bilgisini iletmek için geçici alan set ediliyor
-        recommendation_service._page = page
         result = recommendation_service.get_hybrid_recommendations(
-            current_user_id, 
-            request.emotion_text, 
-            request.content_type
+            user_id=current_user_id, 
+            emotion_text=request.emotion_text, 
+            content_type=request.content_type,
+            page=page
         )
         
         if result["success"]:

@@ -40,6 +40,7 @@ class EmbeddingService:
         
         self._load_model()
         self._load_or_create_index()
+        self._embedding_text_cache = {}  # Cache for repeated text encoding
         self._is_initialized = True
     
     def _load_model(self):
@@ -560,9 +561,21 @@ class EmbeddingService:
             raise
     
     def encode_text(self, text: str) -> np.ndarray:
-        """Encode text to embedding vector"""
+        """Encode text to embedding vector with internal caching"""
         try:
+            if not text:
+                return np.array([])
+            
+            # Use internal cache for repeated texts (e.g. common emotions)
+            if text in self._embedding_text_cache:
+                return self._embedding_text_cache[text].copy()
+            
             embedding = self.model.encode([text])[0]
+            
+            # Cache top 1000 items to prevent memory bloat
+            if len(self._embedding_text_cache) < 1000:
+                self._embedding_text_cache[text] = embedding
+                
             return embedding
         except Exception as e:
             logger.error(f"Error encoding text: {str(e)}")
