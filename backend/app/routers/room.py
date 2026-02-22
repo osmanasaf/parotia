@@ -1,15 +1,15 @@
 import json
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
 from sqlalchemy.orm import Session
 
-from app.core.auth import get_current_user, verify_token
+from app.core.auth import get_current_user
 from app.core.exceptions import BaseAppException
 from app.db import get_db
-from app.models.room import RoomAction
+from app.models.room import Room, RoomAction
 from app.schemas.room import RoomCreate, RoomResponse
 from app.services.room_service import RoomService
 
@@ -73,6 +73,7 @@ def create_room(
         service = RoomService(db)
         room = service.create_room(
             creator_id=current_user_id,
+            creator_session_id=room_data.creator_session_id,
             content_type=room_data.content_type,
             duration=room_data.duration_minutes,
             max_participants=room_data.max_participants,
@@ -80,6 +81,16 @@ def create_room(
         return room
     except Exception as e:
         raise handle_exception(e)
+
+
+@router.get("/", response_model=List[RoomResponse])
+def get_my_rooms(
+    db: Session = Depends(get_db),
+    current_user_id: int = Depends(get_current_user),
+):
+    """Get all rooms created by the logged-in user."""
+    rooms = db.query(Room).filter(Room.creator_id == current_user_id).order_by(Room.created_at.desc()).all()
+    return rooms
 
 
 @router.get("/{code}", response_model=RoomResponse)
@@ -93,19 +104,17 @@ def get_room(code: str, db: Session = Depends(get_db)):
 
 @router.websocket("/{code}/ws")
 async def room_websocket(
-    websocket: WebSocket, code: str, token: str, db: Session = Depends(get_db)
+    websocket: WebSocket, code: str, session_id: str, db: Session = Depends(get_db)
 ):
-    payload = verify_token(token)
-    if not payload:
+    if not session_id:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
-    user_id = payload.get("sub")
     service = RoomService(db)
 
     try:
-        room = service.join_room(user_id, code)
-    except BaseAppException:
+        room = service.join_room(session_id, code)
+    except BaseAppException as e:
         await websocket.close(code=status.WS_1003_UNSUPPORTED_DATA)
         return
 
@@ -113,7 +122,7 @@ async def room_websocket(
 
     await manager.broadcast(code, {
         "type": "user_joined",
-        "user_id": user_id,
+        "session_id": session_id,
         "participants_count": len(room.participants),
     })
 
@@ -124,41 +133,41 @@ async def room_websocket(
             msg_type = message.get("type")
 
             if msg_type == "submit_mood":
-                await _handle_submit_mood(service, code, user_id, message, manager)
+                await _handle_submit_mood(service, code, session_id, message, manager)
 
             elif msg_type == "swipe":
-                await _handle_swipe(service, code, user_id, message, manager)
+                await _handle_swipe(service, code, session_id, message, manager)
 
             elif msg_type == "force_start":
-                await _handle_force_start(service, code, user_id, manager)
+                await _handle_force_start(service, code, session_id, manager)
 
             elif msg_type == "force_finish":
-                await _handle_force_finish(service, code, user_id, manager)
+                await _handle_force_finish(service, code, session_id, manager)
 
             else:
                 await websocket.send_json({"type": "error", "detail": "Unknown message type"})
 
     except WebSocketDisconnect:
         manager.disconnect(websocket, code)
-        await manager.broadcast(code, {"type": "user_left", "user_id": user_id})
+        await manager.broadcast(code, {"type": "user_left", "session_id": session_id})
     except Exception as e:
         logger.error(f"WebSocket error in room {code}: {e}")
         manager.disconnect(websocket, code)
 
 
 async def _handle_submit_mood(
-    service: RoomService, code: str, user_id: int, message: dict, mgr: ConnectionManager
+    service: RoomService, code: str, session_id: str, message: dict, mgr: ConnectionManager
 ):
     mood_text = message.get("text", "").strip()
     if not mood_text:
         return
 
-    room = service.submit_mood(user_id, code, mood_text)
+    room = service.submit_mood(session_id, code, mood_text)
     all_ready = room.are_all_participants_ready()
 
     await mgr.broadcast(code, {
         "type": "user_ready",
-        "user_id": user_id,
+        "session_id": session_id,
         "all_ready": all_ready,
     })
 
@@ -174,7 +183,7 @@ async def _handle_submit_mood(
 
 
 async def _handle_swipe(
-    service: RoomService, code: str, user_id: int, message: dict, mgr: ConnectionManager
+    service: RoomService, code: str, session_id: str, message: dict, mgr: ConnectionManager
 ):
     tmdb_id = message.get("tmdb_id")
     action_str = message.get("action", "").upper()
@@ -184,7 +193,7 @@ async def _handle_swipe(
     except KeyError:
         return
 
-    match = service.record_swipe(user_id, code, tmdb_id, action)
+    match = service.record_swipe(session_id, code, tmdb_id, action)
 
     if match:
         room = service.get_room_by_code(code)
@@ -199,11 +208,11 @@ async def _handle_swipe(
 
 
 async def _handle_force_start(
-    service: RoomService, code: str, user_id: int, mgr: ConnectionManager
+    service: RoomService, code: str, session_id: str, mgr: ConnectionManager
 ):
     """Creator starts voting without waiting for all participants."""
     try:
-        recommendations = service.force_start_voting(user_id, code)
+        recommendations = service.force_start_voting(session_id, code)
         room = service.get_room_by_code(code)
         expires_at = datetime.now(timezone.utc) + timedelta(minutes=room.duration_minutes)
 
@@ -217,11 +226,11 @@ async def _handle_force_start(
 
 
 async def _handle_force_finish(
-    service: RoomService, code: str, user_id: int, mgr: ConnectionManager
+    service: RoomService, code: str, session_id: str, mgr: ConnectionManager
 ):
     """Creator ends voting early, best match is calculated from existing votes."""
     try:
-        best_match = service.force_finish_room(user_id, code)
+        best_match = service.force_finish_room(session_id, code)
 
         if best_match:
             await mgr.broadcast(code, {

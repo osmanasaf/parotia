@@ -15,6 +15,7 @@ from app.core.exceptions import (
     RoomAlreadyStartedException,
     InvalidRoomActionException,
 )
+from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ class RoomService:
     def create_room(
         self,
         creator_id: int,
+        creator_session_id: str,
         content_type: ContentType = ContentType.MIXED,
         duration: int = 5,
         max_participants: int = 5,
@@ -42,6 +44,7 @@ class RoomService:
         room = Room(
             code=room_code,
             creator_id=creator_id,
+            creator_session_id=creator_session_id,
             content_type=content_type,
             duration_minutes=duration,
             max_participants=max_participants,
@@ -51,10 +54,10 @@ class RoomService:
         self.db.commit()
         self.db.refresh(room)
 
-        self._add_participant(room, creator_id)
+        self._add_participant(room, creator_session_id)
         return room
 
-    def join_room(self, user_id: int, room_code: str) -> Room:
+    def join_room(self, session_id: str, room_code: str) -> Room:
         """Add a user to a room. Raises domain exceptions on failure."""
         room = self._get_room_or_raise(room_code)
 
@@ -63,7 +66,7 @@ class RoomService:
 
         existing = self.db.query(RoomParticipant).filter(
             RoomParticipant.room_id == room.id,
-            RoomParticipant.user_id == user_id,
+            RoomParticipant.session_id == session_id,
         ).first()
 
         if existing:
@@ -72,13 +75,13 @@ class RoomService:
         if not room.is_joinable():
             raise RoomFullException()
 
-        self._add_participant(room, user_id)
+        self._add_participant(room, session_id)
         return room
 
-    def submit_mood(self, user_id: int, room_code: str, mood: str) -> Room:
+    def submit_mood(self, session_id: str, room_code: str, mood: str) -> Room:
         """Record a participant's mood and mark them as ready."""
         room = self._get_room_or_raise(room_code)
-        participant = self._get_participant_or_raise(room.id, user_id)
+        participant = self._get_participant_or_raise(room.id, session_id)
 
         participant.submit_mood(mood)
         self.db.commit()
@@ -93,14 +96,14 @@ class RoomService:
         return self._fetch_recommendations(room)
 
     def record_swipe(
-        self, user_id: int, room_code: str, tmdb_id: int, action: RoomAction
+        self, session_id: str, room_code: str, tmdb_id: int, action: RoomAction
     ) -> Optional[RoomMatch]:
         """Record a swipe action and check for a unanimous match."""
         room = self._get_room_or_raise(room_code)
 
         interaction = RoomInteraction(
             room_id=room.id,
-            user_id=user_id,
+            session_id=session_id,
             tmdb_id=tmdb_id,
             action=action,
         )
@@ -112,11 +115,11 @@ class RoomService:
 
         return None
 
-    def force_start_voting(self, user_id: int, room_code: str) -> List[Dict[str, Any]]:
+    def force_start_voting(self, session_id: str, room_code: str) -> List[Dict[str, Any]]:
         """Allow the room creator to start voting even if not all participants joined."""
         room = self._get_room_or_raise(room_code)
 
-        if not room.is_creator(user_id):
+        if not room.is_creator(session_id):
             raise InvalidRoomActionException("Only the room creator can force start")
 
         if room.status != RoomStatus.WAITING:
@@ -127,11 +130,11 @@ class RoomService:
 
         return self.start_voting_session(room)
 
-    def force_finish_room(self, user_id: int, room_code: str) -> Optional[RoomMatch]:
+    def force_finish_room(self, session_id: str, room_code: str) -> Optional[RoomMatch]:
         """Allow the room creator to end voting early and pick the best match."""
         room = self._get_room_or_raise(room_code)
 
-        if not room.is_creator(user_id):
+        if not room.is_creator(session_id):
             raise InvalidRoomActionException("Only the room creator can force finish")
 
         if room.status != RoomStatus.VOTING:
@@ -148,6 +151,30 @@ class RoomService:
 
     def get_room_by_code(self, room_code: str) -> Room:
         return self._get_room_or_raise(room_code)
+
+    def cleanup_expired_rooms(self, minutes_old: int = 30):
+        """Delete inactive rooms or purge session data for finished rooms."""
+        threshold = datetime.now(timezone.utc) - timedelta(minutes=minutes_old)
+
+        # 1. Clean WAITING/VOTING rooms that are abandoned (delete entirely)
+        abandoned_rooms = self.db.query(Room).filter(
+            Room.status.in_([RoomStatus.WAITING, RoomStatus.VOTING]),
+            Room.created_at < threshold
+        ).all()
+        for r in abandoned_rooms:
+            self.db.delete(r)
+
+        # 2. Clean FINISHED rooms (keep Room & RoomMatch, delete participants/interactions to save space)
+        finished_rooms = self.db.query(Room).filter(
+            Room.status == RoomStatus.FINISHED,
+            Room.created_at < threshold
+        ).all()
+        
+        for r in finished_rooms:
+            self.db.query(RoomParticipant).filter(RoomParticipant.room_id == r.id).delete()
+            self.db.query(RoomInteraction).filter(RoomInteraction.room_id == r.id).delete()
+
+        self.db.commit()
 
     # ── Private helpers ──────────────────────────────────────────
 
@@ -171,41 +198,65 @@ class RoomService:
             raise RoomNotFoundException()
         return room
 
-    def _get_participant_or_raise(self, room_id: int, user_id: int) -> RoomParticipant:
+    def _get_participant_or_raise(self, room_id: int, session_id: str) -> RoomParticipant:
         participant = self.db.query(RoomParticipant).filter(
             RoomParticipant.room_id == room_id,
-            RoomParticipant.user_id == user_id,
+            RoomParticipant.session_id == session_id,
         ).first()
         if not participant:
             raise InvalidRoomActionException("User is not a participant in this room")
         return participant
 
-    def _add_participant(self, room: Room, user_id: int):
-        participant = RoomParticipant(room_id=room.id, user_id=user_id)
+    def _add_participant(self, room: Room, session_id: str):
+        participant = RoomParticipant(room_id=room.id, session_id=session_id)
         self.db.add(participant)
         self.db.commit()
         self.db.refresh(room)
 
     def _fetch_recommendations(self, room: Room) -> List[Dict[str, Any]]:
+        """Individual + Joker Pooling Strategy"""
         moods = [p.mood for p in room.participants if p.mood]
         if not moods:
             return []
 
-        combined_mood = " ".join(moods)
         content_type_filter = room.content_type.value if room.content_type != ContentType.MIXED else None
+        
+        all_recommendations: Dict[int, Dict[str, Any]] = {}
 
-        recommendations = self.embedding_service.search_similar_content(
-            query_text=combined_mood,
-            top_k=RECOMMENDATION_COUNT,
+        # 1. Bireysel Havuzlar (10'ar adet)
+        for mood in moods:
+            recs = self.embedding_service.search_similar_content(
+                query_text=mood,
+                top_k=10,
+                content_type=content_type_filter,
+            )
+            for rec in recs:
+                if rec["id"] not in all_recommendations:
+                    all_recommendations[rec["id"]] = rec
+
+        # 2. Joker Popüler İçerikler (5 adet)
+        # TODO: A real popularity fetch. For now, we simulate by fetching movies with "popular, award winning, masterpiece"
+        jokers = self.embedding_service.search_similar_content(
+            query_text="popular award winning masterpiece highly rated best",
+            top_k=5,
             content_type=content_type_filter,
         )
+        for joker in jokers:
+            if joker["id"] not in all_recommendations:
+                all_recommendations[joker["id"]] = joker
 
-        return self._sanitize_recommendations(recommendations)
+        final_pool = list(all_recommendations.values())
+        random.shuffle(final_pool)
+
+        # En fazla RECOMMENDATION_COUNT (20) kadar al
+        final_pool = final_pool[:RECOMMENDATION_COUNT]
+
+        return self._sanitize_recommendations(final_pool)
 
     def _check_for_match(self, room: Room, tmdb_id: int) -> Optional[RoomMatch]:
-        liked_user_ids = {
+        liked_session_ids = {
             row[0]
-            for row in self.db.query(RoomInteraction.user_id)
+            for row in self.db.query(RoomInteraction.session_id)
             .filter(
                 RoomInteraction.room_id == room.id,
                 RoomInteraction.tmdb_id == tmdb_id,
@@ -215,9 +266,9 @@ class RoomService:
             .all()
         }
 
-        participant_user_ids = {p.user_id for p in room.participants}
+        participant_session_ids = {p.session_id for p in room.participants}
 
-        if participant_user_ids.issubset(liked_user_ids):
+        if participant_session_ids.issubset(liked_session_ids):
             match = RoomMatch(room_id=room.id, tmdb_id=tmdb_id)
             self.db.add(match)
             self.db.commit()

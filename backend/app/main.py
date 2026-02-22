@@ -145,6 +145,23 @@ if settings.ENABLE_SCHEDULER and APSCHEDULER_AVAILABLE:
         finally:
             db.close()
 
+    def job_cleanup_expired_rooms():
+        """Clean up inactive or finished rooms older than 30 minutes."""
+        db = SessionLocal()
+        from app.services.room_service import RoomService
+        import logging
+        logger = logging.getLogger(__name__)
+
+        try:
+            logger.info("Starting expired rooms cleanup job")
+            service = RoomService(db)
+            service.cleanup_expired_rooms(minutes_old=30)
+            logger.info("Expired rooms cleanup job completed successfully")
+        except Exception as e:
+            logger.error(f"Failed to cleanup expired rooms: {str(e)}")
+        finally:
+            db.close()
+
     
     scheduler.add_job(
         job_populate_continue,
@@ -161,6 +178,14 @@ if settings.ENABLE_SCHEDULER and APSCHEDULER_AVAILABLE:
         hour=settings.SCHEDULE_HOUR,
         minute=(settings.SCHEDULE_MINUTE + 5) % 60, # Run 5 minutes after populate
         id="daily_cache_popular_and_similar",
+        replace_existing=True,
+    )
+
+    scheduler.add_job(
+        job_cleanup_expired_rooms,
+        trigger="interval",
+        minutes=10,
+        id="interval_cleanup_expired_rooms",
         replace_existing=True,
     )
     

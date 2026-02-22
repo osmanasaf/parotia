@@ -29,6 +29,7 @@ class Room(Base):
     id = Column(Integer, primary_key=True, index=True)
     code = Column(String(6), unique=True, index=True, nullable=False)
     creator_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    creator_session_id = Column(String, index=True, nullable=False)
     status = Column(Enum(RoomStatus), default=RoomStatus.WAITING, nullable=False)
     content_type = Column(Enum(ContentType), default=ContentType.MIXED, nullable=False)
     max_participants = Column(Integer, default=5, nullable=False)
@@ -42,8 +43,8 @@ class Room(Base):
     def is_joinable(self) -> bool:
         return self.status == RoomStatus.WAITING and len(self.participants) < self.max_participants
 
-    def is_creator(self, user_id: int) -> bool:
-        return self.creator_id == user_id
+    def is_creator(self, session_id: str) -> bool:
+        return self.creator_session_id == session_id
 
     def are_all_participants_ready(self) -> bool:
         return bool(self.participants) and all(p.is_ready for p in self.participants)
@@ -67,12 +68,13 @@ class Room(Base):
 class RoomParticipant(Base):
     __tablename__ = "room_participants"
     __table_args__ = (
-        UniqueConstraint("room_id", "user_id", name="uq_room_participant"),
+        UniqueConstraint("room_id", "session_id", name="uq_room_participant"),
     )
 
     id = Column(Integer, primary_key=True, index=True)
-    room_id = Column(Integer, ForeignKey("rooms.id"), nullable=False)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    room_id = Column(Integer, ForeignKey("rooms.id", ondelete="CASCADE"), nullable=False)
+    session_id = Column(String, index=True, nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # Optional for logged-in users
     mood = Column(String, nullable=True)
     is_ready = Column(Boolean, default=False, nullable=False)
     joined_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -88,12 +90,13 @@ class RoomParticipant(Base):
 class RoomInteraction(Base):
     __tablename__ = "room_interactions"
     __table_args__ = (
-        UniqueConstraint("room_id", "user_id", "tmdb_id", name="uq_room_user_content"),
+        UniqueConstraint("room_id", "session_id", "tmdb_id", name="uq_room_user_content"),
     )
 
     id = Column(Integer, primary_key=True, index=True)
-    room_id = Column(Integer, ForeignKey("rooms.id"), nullable=False)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    room_id = Column(Integer, ForeignKey("rooms.id", ondelete="CASCADE"), nullable=False)
+    session_id = Column(String, index=True, nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     tmdb_id = Column(Integer, nullable=False)
     action = Column(Enum(RoomAction), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
