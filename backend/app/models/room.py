@@ -42,8 +42,20 @@ class Room(Base):
     def is_joinable(self) -> bool:
         return self.status == RoomStatus.WAITING and len(self.participants) < self.max_participants
 
+    def is_creator(self, user_id: int) -> bool:
+        return self.creator_id == user_id
+
     def are_all_participants_ready(self) -> bool:
         return bool(self.participants) and all(p.is_ready for p in self.participants)
+
+    def has_any_ready_participant(self) -> bool:
+        return any(p.is_ready for p in self.participants)
+
+    def get_ready_count(self) -> int:
+        return sum(1 for p in self.participants if p.is_ready)
+
+    def get_total_count(self) -> int:
+        return len(self.participants)
 
     def start_voting(self):
         self.status = RoomStatus.VOTING

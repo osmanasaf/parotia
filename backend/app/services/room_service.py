@@ -112,6 +112,35 @@ class RoomService:
 
         return None
 
+    def force_start_voting(self, user_id: int, room_code: str) -> List[Dict[str, Any]]:
+        """Allow the room creator to start voting even if not all participants joined."""
+        room = self._get_room_or_raise(room_code)
+
+        if not room.is_creator(user_id):
+            raise InvalidRoomActionException("Only the room creator can force start")
+
+        if room.status != RoomStatus.WAITING:
+            raise RoomAlreadyStartedException()
+
+        if not room.has_any_ready_participant():
+            raise InvalidRoomActionException("At least one participant must submit a mood before starting")
+
+        return self.start_voting_session(room)
+
+    def force_finish_room(self, user_id: int, room_code: str) -> Optional[RoomMatch]:
+        """Allow the room creator to end voting early and pick the best match."""
+        room = self._get_room_or_raise(room_code)
+
+        if not room.is_creator(user_id):
+            raise InvalidRoomActionException("Only the room creator can force finish")
+
+        if room.status != RoomStatus.VOTING:
+            raise InvalidRoomActionException("Room is not in voting state")
+
+        best_match = self._calculate_best_match(room)
+        self.finish_room(room)
+        return best_match
+
     def finish_room(self, room: Room):
         """Mark the room as finished."""
         room.finish()
@@ -205,3 +234,33 @@ class RoomService:
             clean = {k: v for k, v in rec.items() if k != "embedding_vector"}
             sanitized.append(clean)
         return sanitized
+
+    def _calculate_best_match(self, room: Room) -> Optional[RoomMatch]:
+        """Find the content with the highest combined score across all participants.
+
+        Scoring: SUPERLIKE = 3 points, LIKE = 1 point, DISLIKE = 0.
+        """
+        positive_interactions = (
+            self.db.query(RoomInteraction)
+            .filter(
+                RoomInteraction.room_id == room.id,
+                RoomInteraction.action.in_([RoomAction.LIKE, RoomAction.SUPERLIKE]),
+            )
+            .all()
+        )
+
+        if not positive_interactions:
+            return None
+
+        scores: Dict[int, int] = {}
+        for interaction in positive_interactions:
+            weight = 3 if interaction.action == RoomAction.SUPERLIKE else 1
+            scores[interaction.tmdb_id] = scores.get(interaction.tmdb_id, 0) + weight
+
+        best_tmdb_id = max(scores, key=scores.get)
+
+        match = RoomMatch(room_id=room.id, tmdb_id=best_tmdb_id)
+        self.db.add(match)
+        self.db.commit()
+        self.db.refresh(match)
+        return match

@@ -129,6 +129,12 @@ async def room_websocket(
             elif msg_type == "swipe":
                 await _handle_swipe(service, code, user_id, message, manager)
 
+            elif msg_type == "force_start":
+                await _handle_force_start(service, code, user_id, manager)
+
+            elif msg_type == "force_finish":
+                await _handle_force_finish(service, code, user_id, manager)
+
             else:
                 await websocket.send_json({"type": "error", "detail": "Unknown message type"})
 
@@ -190,3 +196,44 @@ async def _handle_swipe(
         })
 
         await mgr.close_room(code)
+
+
+async def _handle_force_start(
+    service: RoomService, code: str, user_id: int, mgr: ConnectionManager
+):
+    """Creator starts voting without waiting for all participants."""
+    try:
+        recommendations = service.force_start_voting(user_id, code)
+        room = service.get_room_by_code(code)
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=room.duration_minutes)
+
+        await mgr.broadcast(code, {
+            "type": "start_voting",
+            "recommendations": recommendations,
+            "expires_at": expires_at.isoformat(),
+        })
+    except BaseAppException as e:
+        await mgr.broadcast(code, {"type": "error", "detail": e.message})
+
+
+async def _handle_force_finish(
+    service: RoomService, code: str, user_id: int, mgr: ConnectionManager
+):
+    """Creator ends voting early, best match is calculated from existing votes."""
+    try:
+        best_match = service.force_finish_room(user_id, code)
+
+        if best_match:
+            await mgr.broadcast(code, {
+                "type": "match_found",
+                "tmdb_id": best_match.tmdb_id,
+            })
+        else:
+            await mgr.broadcast(code, {
+                "type": "no_match",
+                "detail": "No positive votes were cast",
+            })
+
+        await mgr.close_room(code)
+    except BaseAppException as e:
+        await mgr.broadcast(code, {"type": "error", "detail": e.message})
