@@ -28,6 +28,9 @@ origins = [o.strip() for o in origins_env.split(",") if o.strip()] or [
     "http://127.0.0.1:3000",
     "http://localhost:3001",
     "http://127.0.0.1:3001",
+    "https://movai.tr",
+    "https://www.movai.tr",
+    "https://web-production-15ed6.up.railway.app",
 ]
 
 app.add_middleware(
