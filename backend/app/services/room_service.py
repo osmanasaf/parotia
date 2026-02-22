@@ -130,8 +130,8 @@ class RoomService:
 
         return self.start_voting_session(room)
 
-    def force_finish_room(self, session_id: str, room_code: str) -> Optional[RoomMatch]:
-        """Allow the room creator to end voting early and pick the best match."""
+    def force_finish_room(self, session_id: str, room_code: str) -> List[RoomMatch]:
+        """Allow the room creator to end voting early and get the top ranked matches."""
         room = self._get_room_or_raise(room_code)
 
         if not room.is_creator(session_id):
@@ -140,9 +140,9 @@ class RoomService:
         if room.status != RoomStatus.VOTING:
             raise InvalidRoomActionException("Room is not in voting state")
 
-        best_match = self._calculate_best_match(room)
+        best_matches = self._calculate_top_matches(room)
         self.finish_room(room)
-        return best_match
+        return best_matches
 
     def finish_room(self, room: Room):
         """Mark the room as finished."""
@@ -286,8 +286,8 @@ class RoomService:
             sanitized.append(clean)
         return sanitized
 
-    def _calculate_best_match(self, room: Room) -> Optional[RoomMatch]:
-        """Find the content with the highest combined score across all participants.
+    def _calculate_top_matches(self, room: Room, top_k: int = 5) -> List[RoomMatch]:
+        """Find the contents with the highest combined score across all participants.
 
         Scoring: SUPERLIKE = 3 points, LIKE = 1 point, DISLIKE = 0.
         """
@@ -301,17 +301,25 @@ class RoomService:
         )
 
         if not positive_interactions:
-            return None
+            return []
 
         scores: Dict[int, int] = {}
         for interaction in positive_interactions:
             weight = 3 if interaction.action == RoomAction.SUPERLIKE else 1
             scores[interaction.tmdb_id] = scores.get(interaction.tmdb_id, 0) + weight
 
-        best_tmdb_id = max(scores, key=scores.get)
+        # Sort by score descending
+        sorted_tmdb_ids = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        top_tmdb_ids = [k for k, v in sorted_tmdb_ids[:top_k]]
 
-        match = RoomMatch(room_id=room.id, tmdb_id=best_tmdb_id)
-        self.db.add(match)
+        matches = []
+        for tmdb_id in top_tmdb_ids:
+            match = RoomMatch(room_id=room.id, tmdb_id=tmdb_id)
+            self.db.add(match)
+            matches.append(match)
+            
         self.db.commit()
-        self.db.refresh(match)
-        return match
+        for match in matches:
+            self.db.refresh(match)
+            
+        return matches

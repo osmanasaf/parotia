@@ -9,9 +9,9 @@ def main():
         service = RoomService(db)
         print("Creating room...")
         
-        # We no longer need user_id, it is fully anonymous
+        # We need a valid user_id to be creator. Let's assume user_id=1 exists
         creator_session = str(uuid.uuid4())
-        room = service.create_room(creator_session_id=creator_session)
+        room = service.create_room(creator_id=1, creator_session_id=creator_session)
         print(f"Room created: {room.code}")
 
         # Add another anon participant
@@ -37,11 +37,13 @@ def main():
                 match = service.record_swipe(participant2_session, room.code, first_rec_id, RoomAction.SUPERLIKE)
                 
                 if match:
-                    print(f"Match found! TMDB ID: {match.tmdb_id}")
-                    service.finish_room(room)
-                    print(f"Room status is now: {room.status}")
-                else:
-                    print("No match found.")
+                    print(f"Interim match found! TMDB ID: {match.tmdb_id}")
+                
+                print("Force finishing room to get top matches...")
+                best_matches = service.force_finish_room(creator_session, room.code)
+                for bm in best_matches:
+                    print(f"Top Match: {bm.tmdb_id}")
+                print(f"Room status is now: {room.status}")
 
             print("Testing TTL cleanup...")
             service.cleanup_expired_rooms(minutes_old=0)

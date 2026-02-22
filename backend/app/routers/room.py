@@ -196,16 +196,10 @@ async def _handle_swipe(
     match = service.record_swipe(session_id, code, tmdb_id, action)
 
     if match:
-        room = service.get_room_by_code(code)
-        service.finish_room(room)
-
         await mgr.broadcast(code, {
             "type": "match_found",
             "tmdb_id": tmdb_id,
         })
-
-        await mgr.close_room(code)
-
 
 async def _handle_force_start(
     service: RoomService, code: str, session_id: str, mgr: ConnectionManager
@@ -230,12 +224,12 @@ async def _handle_force_finish(
 ):
     """Creator ends voting early, best match is calculated from existing votes."""
     try:
-        best_match = service.force_finish_room(session_id, code)
+        best_matches = service.force_finish_room(session_id, code)
 
-        if best_match:
+        if best_matches:
             await mgr.broadcast(code, {
-                "type": "match_found",
-                "tmdb_id": best_match.tmdb_id,
+                "type": "voting_finished",
+                "matches": [{"tmdb_id": m.tmdb_id} for m in best_matches]
             })
         else:
             await mgr.broadcast(code, {
