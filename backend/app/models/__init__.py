@@ -9,9 +9,12 @@ from .user_interaction import (
     UserRating, UserWatchlist, UserRecommendation, 
     UserEmotionalProfile, RecommendationSelection
 )
+from .room import Room, RoomParticipant, RoomInteraction, RoomMatch
 
 __all__ = [
     'Movie', 'User', 'Comment', 'Watchlist', 'RecommendationFeedback', 
     'ContentEmbedding', 'UserRating', 'UserWatchlist', 'UserRecommendation', 
-    'UserEmotionalProfile', 'RecommendationSelection'
-] 
+    'UserEmotionalProfile', 'RecommendationSelection',
+    'Room', 'RoomParticipant', 'RoomInteraction', 'RoomMatch'
+]
+ 

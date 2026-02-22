@@ -64,4 +64,24 @@ class InvalidVerificationCodeException(BaseAppException):
 class EmailServiceException(BaseAppException):
     """Raised when email service fails"""
     def __init__(self, message: str = "Email service error"):
-        super().__init__(message, status.HTTP_500_INTERNAL_SERVER_ERROR) 
+        super().__init__(message, status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+class RoomNotFoundException(BaseAppException):
+    """Raised when room is not found"""
+    def __init__(self, message: str = "Room not found"):
+        super().__init__(message, status.HTTP_404_NOT_FOUND)
+
+class RoomFullException(BaseAppException):
+    """Raised when room has reached max participants"""
+    def __init__(self, message: str = "Room is full"):
+        super().__init__(message, status.HTTP_400_BAD_REQUEST)
+
+class RoomAlreadyStartedException(BaseAppException):
+    """Raised when trying to join a room that is no longer in WAITING state"""
+    def __init__(self, message: str = "Room has already started"):
+        super().__init__(message, status.HTTP_400_BAD_REQUEST)
+
+class InvalidRoomActionException(BaseAppException):
+    """Raised when an invalid action is performed on a room"""
+    def __init__(self, message: str = "Invalid room action"):
+        super().__init__(message, status.HTTP_400_BAD_REQUEST)

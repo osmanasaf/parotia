@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import health, movies, tv, recommendations, auth, emotion_analysis, content
+from app.routers import health, movies, tv, recommendations, auth, emotion_analysis, content, room
 from app.core.config import get_settings
 from app.db import SessionLocal
 from app.services.recommendation_service import RecommendationService
@@ -45,6 +45,7 @@ app.include_router(tv.router)
 app.include_router(recommendations.router)
 app.include_router(auth.router)
 app.include_router(emotion_analysis.router) 
+app.include_router(room.router)
 
 if settings.ENABLE_SCHEDULER and APSCHEDULER_AVAILABLE:
     scheduler = BackgroundScheduler(timezone="UTC")
