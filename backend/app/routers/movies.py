@@ -171,6 +171,86 @@ def get_movie_details_with_similar_public(
     except Exception as e:
         raise handle_exception(e)
 
+@router.get("/details-public/{tmdb_id}")
+def get_movie_details_public(
+    tmdb_id: int,
+    db: Session = Depends(get_db)
+):
+    """Sadece film detaylarını döner (public)."""
+    try:
+        from app.core.cache import CacheService
+        cache_service = CacheService()
+        cache_key = f"tmdb:movie:{tmdb_id}:details_public"
+        
+        cached_result = cache_service.get_json(cache_key)
+        if cached_result:
+            return cached_result
+
+        movie_service = MovieService(db)
+        detail_result = movie_service.get_movie_details(tmdb_id)
+        if not detail_result["success"]:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Movie not found")
+
+        response_data = {
+            "success": True,
+            "data": detail_result["data"]
+        }
+        
+        # Cache for 24 hours
+        cache_service.set_json(cache_key, response_data, 86400)
+        
+        return response_data
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise handle_exception(e)
+
+@router.get("/similar-public/{tmdb_id}")
+def get_similar_movies_public(
+    tmdb_id: int,
+    db: Session = Depends(get_db)
+):
+    """Benzer filmleri döner (public, 12 adet)."""
+    try:
+        from app.core.cache import CacheService
+        cache_service = CacheService()
+        cache_key = f"tmdb:movie:{tmdb_id}:similar_public_v2" # v2 because limit is 12 now
+        
+        cached_result = cache_service.get_json(cache_key)
+        if cached_result:
+            return cached_result
+
+        movie_service = MovieService(db)
+        detail_result = movie_service.get_movie_details(tmdb_id)
+        if not detail_result["success"]:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Movie not found")
+
+        detail = detail_result["data"]
+        overview_text = detail.get("overview", "")
+
+        rec_service = RecommendationService(db)
+        # 12 tane dönmesi istendi
+        similar = rec_service.get_emotion_based_recommendations_public(
+            overview_text, 
+            content_type="movie", 
+            exclude_tmdb_ids={tmdb_id},
+            page_size=12
+        )
+
+        response_data = {
+            "success": True,
+            "data": similar.get("data", {}).get("recommendations", [])
+        }
+        
+        # Cache for 24 hours
+        cache_service.set_json(cache_key, response_data, 86400)
+        
+        return response_data
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise handle_exception(e)
+
 @router.get("/{tmdb_id}/watch-providers")
 def get_movie_watch_providers(
     tmdb_id: int,

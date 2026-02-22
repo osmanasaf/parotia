@@ -134,12 +134,12 @@ class RecommendationService:
             "rank": current_len + 1,
         }
 
-    def _stable_page_enrich_single(self, candidate_ids: list, page: int, content_type: str, *, save_params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    def _stable_page_enrich_single(self, candidate_ids: list, page: int, content_type: str, *, save_params: Optional[Dict[str, Any]] = None, page_size: int = PAGE_SIZE) -> List[Dict[str, Any]]:
         page = min(max(page, 1), MAX_PAGES)
-        start = (page - 1) * PAGE_SIZE
+        start = (page - 1) * page_size
         clean: List[Dict[str, Any]] = []
         i = start
-        while i < len(candidate_ids) and len(clean) < PAGE_SIZE:
+        while i < len(candidate_ids) and len(clean) < page_size:
             end = min(i + DETAILS_FETCH_CHUNK, len(candidate_ids))
 
             def _job(idx: int):
@@ -171,18 +171,18 @@ class RecommendationService:
                         )
                     except Exception:
                         pass
-                if len(clean) >= PAGE_SIZE:
+                if len(clean) >= page_size:
                     break
 
             i = end
         return clean
 
-    def _stable_page_enrich_mixed(self, candidate_ids: list, page: int) -> List[Dict[str, Any]]:
+    def _stable_page_enrich_mixed(self, candidate_ids: list, page: int, page_size: int = PAGE_SIZE) -> List[Dict[str, Any]]:
         page = min(max(page, 1), MAX_PAGES)
-        start = (page - 1) * PAGE_SIZE
+        start = (page - 1) * page_size
         clean: List[Dict[str, Any]] = []
         i = start
-        while i < len(candidate_ids) and len(clean) < PAGE_SIZE:
+        while i < len(candidate_ids) and len(clean) < page_size:
             end = min(i + DETAILS_FETCH_CHUNK, len(candidate_ids))
 
             def _job(idx: int):
@@ -200,7 +200,7 @@ class RecommendationService:
                     continue
                 clean_rec = self._build_clean_rec(tmdb_id, ct, data, sim_score, len(clean))
                 clean.append(clean_rec)
-                if len(clean) >= PAGE_SIZE:
+                if len(clean) >= page_size:
                     break
 
             i = end
@@ -285,7 +285,7 @@ class RecommendationService:
     # KAMUYA AÇIK (AUTH GEREKTİRMEYEN) ÖNERİ METODLARI
     # ============================================================================
 
-    def get_emotion_based_recommendations_public(self, emotion_text: str, content_type: str = "movie", exclude_tmdb_ids: Optional[set] = None, page: int = 1) -> Dict[str, Any]:
+    def get_emotion_based_recommendations_public(self, emotion_text: str, content_type: str = "movie", exclude_tmdb_ids: Optional[set] = None, page: int = 1, page_size: int = PAGE_SIZE) -> Dict[str, Any]:
         """Token gerektirmeyen, anlık duygu metnine göre öneriler (Redis Önbellekli)."""
         try:
             # All türü için hem movie hem tv sonuçlarını birleştir
@@ -293,7 +293,7 @@ class RecommendationService:
                 return self._get_emotion_based_recommendations_public_all(emotion_text, page)
             
             # 1. Önbellek Kontrolü (Public sonuçlar paylaşımlıdır, user_id içermez)
-            cache_key = f"rec:public:emotion:{emotion_text}:{content_type}:p{page}"
+            cache_key = f"rec:public:emotion:{emotion_text}:{content_type}:p{page}:sz{page_size}"
             cached = self.cache.get_json(cache_key)
             if cached:
                 return cached
@@ -328,6 +328,7 @@ class RecommendationService:
                 candidate_ids,
                 page,
                 content_type,
+                page_size=page_size
             )
 
             final_result = {
@@ -338,8 +339,8 @@ class RecommendationService:
                     "content_type": content_type,
                     "total": len(candidate_ids),
                     "page": page,
-                    "page_size": PAGE_SIZE,
-                    "total_pages": min((len(candidate_ids) + PAGE_SIZE - 1) // PAGE_SIZE, MAX_PAGES),
+                    "page_size": page_size,
+                    "total_pages": min((len(candidate_ids) + page_size - 1) // page_size, MAX_PAGES),
                     "method": "emotion_public"
                 }
             }
@@ -349,7 +350,7 @@ class RecommendationService:
             logger.error(f"Error getting public emotion-based recommendations: {str(e)}")
             return {"success": False, "error": str(e)}
 
-    def _get_emotion_based_recommendations_public_all(self, emotion_text: str, page: int) -> Dict[str, Any]:
+    def _get_emotion_based_recommendations_public_all(self, emotion_text: str, page: int, page_size: int = PAGE_SIZE) -> Dict[str, Any]:
         """Public all: movie ve tv adaylarını birleştirip 9'luk sayfa döndürür."""
         try:
             # 1) Emotion embedding (model supports Turkish and 50+ languages natively)
@@ -380,7 +381,7 @@ class RecommendationService:
 
             # 4) Stabil sayfalama (9 öğe doldurmak için ileri bakış)
             page = min(max(page, 1), MAX_PAGES)
-            clean_recommendations = self._stable_page_enrich_mixed(candidate_ids, page)
+            clean_recommendations = self._stable_page_enrich_mixed(candidate_ids, page, page_size=page_size)
 
             return {
                 "success": True,
@@ -390,8 +391,8 @@ class RecommendationService:
                     "content_type": "all",
                     "total": len(candidate_ids),
                     "page": page,
-                    "page_size": PAGE_SIZE,
-                    "total_pages": min((len(candidate_ids) + PAGE_SIZE - 1) // PAGE_SIZE, MAX_PAGES),
+                    "page_size": page_size,
+                    "total_pages": min((len(candidate_ids) + page_size - 1) // page_size, MAX_PAGES),
                     "method": "emotion_public_all"
                 }
             }
