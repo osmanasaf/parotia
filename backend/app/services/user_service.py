@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime
 from typing import Optional
 from sqlalchemy.orm import Session
 from app.schemas.user import UserCreate, UserUpdate, UserNameUpdate
@@ -10,6 +11,7 @@ from app.core.exceptions import (
 from app.repositories.user_repository import UserRepository, EmailVerificationRepository
 from app.services.email_service import EmailService
 from app.models.user import User
+from app.models.refresh_token import RefreshToken
 
 logger = logging.getLogger(__name__)
 
@@ -220,3 +222,34 @@ class UserService:
         # is_verified değerini koru
         self.user_repository.update_user_fields(user, {"hashed_password": new_hashed, "is_verified": user.is_verified})
         return True
+
+    def store_refresh_token(self, user_id: int, token: str, expires_at: datetime):
+        """Store a new refresh token for a user"""
+        # Revoke old tokens first (optional, but good for security)
+        self.db.query(RefreshToken).filter(RefreshToken.user_id == user_id).delete()
+        
+        refresh_token = RefreshToken(
+            user_id=user_id,
+            token=token,
+            expires_at=expires_at
+        )
+        self.db.add(refresh_token)
+        self.db.commit()
+
+    def verify_refresh_token(self, token: str) -> Optional[int]:
+        """Verify a refresh token and return user_id"""
+        db_token = self.db.query(RefreshToken).filter(RefreshToken.token == token).first()
+        if not db_token:
+            return None
+            
+        if db_token.expires_at.replace(tzinfo=None) < datetime.utcnow():
+            self.db.delete(db_token)
+            self.db.commit()
+            return None
+            
+        return db_token.user_id
+
+    def revoke_refresh_token(self, token: str):
+        """Revoke a refresh token"""
+        self.db.query(RefreshToken).filter(RefreshToken.token == token).delete()
+        self.db.commit()

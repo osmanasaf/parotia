@@ -10,11 +10,13 @@ from .user_interaction import (
     UserEmotionalProfile, RecommendationSelection
 )
 from .room import Room, RoomParticipant, RoomInteraction, RoomMatch
+from .refresh_token import RefreshToken
 
 __all__ = [
     'Movie', 'User', 'Comment', 'Watchlist', 'RecommendationFeedback', 
     'ContentEmbedding', 'UserRating', 'UserWatchlist', 'UserRecommendation', 
     'UserEmotionalProfile', 'RecommendationSelection',
-    'Room', 'RoomParticipant', 'RoomInteraction', 'RoomMatch'
+    'Room', 'RoomParticipant', 'RoomInteraction', 'RoomMatch',
+    'RefreshToken'
 ]
  

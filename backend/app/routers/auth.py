@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.schemas.user import UserCreate, UserLogin, UserResponse, Token, UserUpdate, PasswordChange, EmailChangeRequest, EmailChangeConfirm, PasswordResetRequest, PasswordResetConfirm, UserNameUpdate
 from app.services.user_service import UserService
-from app.core.auth import create_access_token, get_current_user
+from app.core.auth import create_access_token, create_refresh_token, get_current_user
 from app.core.exceptions import BaseAppException, EmailNotVerifiedException, InvalidCredentialsException
 from app.core.config import get_settings
 from datetime import timedelta
@@ -104,7 +104,17 @@ def login(user_credentials: UserLogin, db: Session = Depends(get_db)):
             data={"sub": str(user.id)}, expires_delta=access_token_expires
         )
         
-        return {"access_token": access_token, "token_type": "bearer"}
+        # Create refresh token
+        refresh_token, refresh_token_expires = create_refresh_token(
+            data={"sub": str(user.id)}
+        )
+        user_service.store_refresh_token(user.id, refresh_token, refresh_token_expires)
+        
+        return {
+            "access_token": access_token, 
+            "refresh_token": refresh_token,
+            "token_type": "bearer"
+        }
         
     except Exception as e:
         raise handle_exception(e)
@@ -200,5 +210,50 @@ def confirm_password_reset(payload: PasswordResetConfirm, db: Session = Depends(
         user_service = UserService(db)
         user_service.confirm_password_reset(payload.email, payload.code, payload.new_password)
         return {"message": "Şifreniz başarıyla sıfırlandı"}
+    except Exception as e:
+        raise handle_exception(e)
+
+@router.post("/refresh", response_model=Token)
+def refresh_token(refresh_token: str, db: Session = Depends(get_db)):
+    """Refresh access token using a refresh token"""
+    try:
+        user_service = UserService(db)
+        user_id = user_service.verify_refresh_token(refresh_token)
+        
+        if not user_id:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or expired refresh token",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        
+        # Create new access token
+        settings = get_settings()
+        access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+        new_access_token = create_access_token(
+            data={"sub": str(user_id)}, expires_delta=access_token_expires
+        )
+        
+        # Create new refresh token (rotation)
+        new_refresh_token, refresh_token_expires = create_refresh_token(
+            data={"sub": str(user_id)}
+        )
+        user_service.store_refresh_token(user_id, new_refresh_token, refresh_token_expires)
+        
+        return {
+            "access_token": new_access_token, 
+            "refresh_token": new_refresh_token,
+            "token_type": "bearer"
+        }
+    except Exception as e:
+        raise handle_exception(e)
+
+@router.post("/logout")
+def logout(refresh_token: str, db: Session = Depends(get_db)):
+    """Logout user and invalidate refresh token"""
+    try:
+        user_service = UserService(db)
+        user_service.revoke_refresh_token(refresh_token)
+        return {"message": "Successfully logged out"}
     except Exception as e:
         raise handle_exception(e)
