@@ -1,7 +1,8 @@
+import asyncio
 import logging
 import random
 import string
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from sqlalchemy.orm import Session
 
 from app.models.room import (
@@ -78,6 +79,30 @@ class RoomService:
         self._add_participant(room, session_id)
         return room
 
+    def join_or_rejoin_room(self, session_id: str, room_code: str) -> Room:
+        """Add a user to a room or allow reconnect to an active VOTING room."""
+        room = self._get_room_or_raise(room_code)
+
+        existing = self.db.query(RoomParticipant).filter(
+            RoomParticipant.room_id == room.id,
+            RoomParticipant.session_id == session_id,
+        ).first()
+
+        if existing:
+            return room
+
+        if room.status == RoomStatus.FINISHED:
+            raise InvalidRoomActionException("Room has already finished")
+
+        if room.status == RoomStatus.VOTING:
+            raise RoomAlreadyStartedException()
+
+        if not room.is_joinable():
+            raise RoomFullException()
+
+        self._add_participant(room, session_id)
+        return room
+
     def submit_mood(self, session_id: str, room_code: str, mood: str) -> Room:
         """Record a participant's mood and mark them as ready."""
         room = self._get_room_or_raise(room_code)
@@ -88,34 +113,47 @@ class RoomService:
         self.db.refresh(room)
         return room
 
-    def start_voting_session(self, room: Room) -> List[Dict[str, Any]]:
+    async def start_voting_session(self, room: Room) -> List[Dict[str, Any]]:
         """Transition room to VOTING and return recommendations."""
         room.start_voting()
         self.db.commit()
 
-        return self._fetch_recommendations(room)
+        return await self._fetch_recommendations_async(room)
 
     def record_swipe(
         self, session_id: str, room_code: str, tmdb_id: int, action: RoomAction
-    ) -> Optional[RoomMatch]:
-        """Record a swipe action and check for a unanimous match."""
+    ) -> Tuple[Optional[RoomMatch], bool]:
+        """Record a swipe action and check for a unanimous match.
+
+        Returns (match_or_None, all_participants_done).
+        all_participants_done is True when every participant has swiped every recommendation.
+        """
         room = self._get_room_or_raise(room_code)
 
-        interaction = RoomInteraction(
-            room_id=room.id,
-            session_id=session_id,
-            tmdb_id=tmdb_id,
-            action=action,
-        )
-        self.db.add(interaction)
-        self.db.commit()
+        existing_interaction = self.db.query(RoomInteraction).filter(
+            RoomInteraction.room_id == room.id,
+            RoomInteraction.session_id == session_id,
+            RoomInteraction.tmdb_id == tmdb_id,
+        ).first()
 
+        if not existing_interaction:
+            interaction = RoomInteraction(
+                room_id=room.id,
+                session_id=session_id,
+                tmdb_id=tmdb_id,
+                action=action,
+            )
+            self.db.add(interaction)
+            self.db.commit()
+
+        match = None
         if action in (RoomAction.LIKE, RoomAction.SUPERLIKE):
-            return self._check_for_match(room, tmdb_id)
+            match = self._check_for_match(room, tmdb_id)
 
-        return None
+        all_done = self._have_all_participants_finished_swiping(room)
+        return match, all_done
 
-    def force_start_voting(self, session_id: str, room_code: str) -> List[Dict[str, Any]]:
+    async def force_start_voting(self, session_id: str, room_code: str) -> List[Dict[str, Any]]:
         """Allow the room creator to start voting even if not all participants joined."""
         room = self._get_room_or_raise(room_code)
 
@@ -128,7 +166,7 @@ class RoomService:
         if not room.has_any_ready_participant():
             raise InvalidRoomActionException("At least one participant must submit a mood before starting")
 
-        return self.start_voting_session(room)
+        return await self.start_voting_session(room)
 
     def force_finish_room(self, session_id: str, room_code: str) -> List[RoomMatch]:
         """Allow the room creator to end voting early and get the top ranked matches."""
@@ -213,42 +251,38 @@ class RoomService:
         self.db.commit()
         self.db.refresh(room)
 
-    def _fetch_recommendations(self, room: Room) -> List[Dict[str, Any]]:
-        """Individual + Joker Pooling Strategy"""
+    async def _fetch_recommendations_async(self, room: Room) -> List[Dict[str, Any]]:
+        """Individual + Joker Pooling Strategy — paralel embedding aramaları."""
         moods = [p.mood for p in room.participants if p.mood]
         if not moods:
             return []
 
         content_type_filter = room.content_type.value if room.content_type != ContentType.MIXED else None
-        
-        all_recommendations: Dict[int, Dict[str, Any]] = {}
 
-        # 1. Bireysel Havuzlar (10'ar adet)
-        for mood in moods:
-            recs = self.embedding_service.search_similar_content(
-                query_text=mood,
-                top_k=10,
+        loop = asyncio.get_event_loop()
+
+        def search(query: str, top_k: int) -> List[Dict[str, Any]]:
+            return self.embedding_service.search_similar_content(
+                query_text=query,
+                top_k=top_k,
                 content_type=content_type_filter,
             )
+
+        queries = [(mood, 10) for mood in moods]
+        queries.append(("popular award winning masterpiece highly rated best", 5))
+
+        results = await asyncio.gather(
+            *[loop.run_in_executor(None, search, q, k) for q, k in queries]
+        )
+
+        all_recommendations: Dict[int, Dict[str, Any]] = {}
+        for recs in results:
             for rec in recs:
                 if rec["id"] not in all_recommendations:
                     all_recommendations[rec["id"]] = rec
 
-        # 2. Joker Popüler İçerikler (5 adet)
-        # TODO: A real popularity fetch. For now, we simulate by fetching movies with "popular, award winning, masterpiece"
-        jokers = self.embedding_service.search_similar_content(
-            query_text="popular award winning masterpiece highly rated best",
-            top_k=5,
-            content_type=content_type_filter,
-        )
-        for joker in jokers:
-            if joker["id"] not in all_recommendations:
-                all_recommendations[joker["id"]] = joker
-
         final_pool = list(all_recommendations.values())
         random.shuffle(final_pool)
-
-        # En fazla RECOMMENDATION_COUNT (20) kadar al
         final_pool = final_pool[:RECOMMENDATION_COUNT]
 
         return self._sanitize_recommendations(final_pool)
@@ -268,14 +302,53 @@ class RoomService:
 
         participant_session_ids = {p.session_id for p in room.participants}
 
-        if participant_session_ids.issubset(liked_session_ids):
-            match = RoomMatch(room_id=room.id, tmdb_id=tmdb_id)
-            self.db.add(match)
-            self.db.commit()
-            self.db.refresh(match)
-            return match
+        if not participant_session_ids.issubset(liked_session_ids):
+            return None
 
-        return None
+        existing_match = self.db.query(RoomMatch).filter(
+            RoomMatch.room_id == room.id,
+            RoomMatch.tmdb_id == tmdb_id,
+        ).first()
+        if existing_match:
+            return existing_match
+
+        match = RoomMatch(room_id=room.id, tmdb_id=tmdb_id)
+        self.db.add(match)
+        self.db.commit()
+        self.db.refresh(match)
+        return match
+
+    def _have_all_participants_finished_swiping(self, room: Room) -> bool:
+        """Return True if every participant has swiped every recommendation in this room."""
+        if room.status != RoomStatus.VOTING:
+            return False
+
+        participant_ids = {p.session_id for p in room.participants}
+        if not participant_ids:
+            return False
+
+        swiped_tmdb_ids_per_participant: Dict[str, set] = {sid: set() for sid in participant_ids}
+
+        interactions = (
+            self.db.query(RoomInteraction.session_id, RoomInteraction.tmdb_id)
+            .filter(RoomInteraction.room_id == room.id)
+            .all()
+        )
+        for session_id, tmdb_id in interactions:
+            if session_id in swiped_tmdb_ids_per_participant:
+                swiped_tmdb_ids_per_participant[session_id].add(tmdb_id)
+
+        all_tmdb_ids = set()
+        for tmdb_ids in swiped_tmdb_ids_per_participant.values():
+            all_tmdb_ids |= tmdb_ids
+
+        if not all_tmdb_ids:
+            return False
+
+        return all(
+            all_tmdb_ids.issubset(swiped)
+            for swiped in swiped_tmdb_ids_per_participant.values()
+        )
 
     @staticmethod
     def _sanitize_recommendations(recommendations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

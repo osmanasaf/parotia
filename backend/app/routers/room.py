@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -9,7 +10,7 @@ from sqlalchemy.orm import Session
 from app.core.auth import get_current_user
 from app.core.exceptions import BaseAppException
 from app.db import get_db
-from app.models.room import Room, RoomAction
+from app.models.room import Room, RoomAction, RoomStatus
 from app.schemas.room import RoomCreate, RoomResponse
 from app.services.room_service import RoomService
 
@@ -113,7 +114,7 @@ async def room_websocket(
     service = RoomService(db)
 
     try:
-        room = service.join_room(session_id, code)
+        room = service.join_or_rejoin_room(session_id, code)
     except BaseAppException as e:
         await websocket.close(code=status.WS_1003_UNSUPPORTED_DATA)
         return
@@ -129,7 +130,12 @@ async def room_websocket(
     try:
         while True:
             raw = await websocket.receive_text()
-            message = json.loads(raw)
+            try:
+                message = json.loads(raw)
+            except json.JSONDecodeError:
+                await websocket.send_json({"type": "error", "detail": "Invalid JSON"})
+                continue
+
             msg_type = message.get("type")
 
             if msg_type == "submit_mood":
@@ -169,10 +175,12 @@ async def _handle_submit_mood(
         "type": "user_ready",
         "session_id": session_id,
         "all_ready": all_ready,
+        "ready_count": room.get_ready_count(),
+        "total_count": room.get_total_count(),
     })
 
     if all_ready:
-        recommendations = service.start_voting_session(room)
+        recommendations = await service.start_voting_session(room)
         expires_at = datetime.now(timezone.utc) + timedelta(minutes=room.duration_minutes)
 
         await mgr.broadcast(code, {
@@ -188,12 +196,15 @@ async def _handle_swipe(
     tmdb_id = message.get("tmdb_id")
     action_str = message.get("action", "").upper()
 
+    if not tmdb_id:
+        return
+
     try:
         action = RoomAction[action_str]
     except KeyError:
         return
 
-    match = service.record_swipe(session_id, code, tmdb_id, action)
+    match, all_done = service.record_swipe(session_id, code, tmdb_id, action)
 
     if match:
         await mgr.broadcast(code, {
@@ -201,12 +212,15 @@ async def _handle_swipe(
             "tmdb_id": tmdb_id,
         })
 
+    if all_done:
+        await _finish_room_and_broadcast(service, code, mgr)
+
 async def _handle_force_start(
     service: RoomService, code: str, session_id: str, mgr: ConnectionManager
 ):
     """Creator starts voting without waiting for all participants."""
     try:
-        recommendations = service.force_start_voting(session_id, code)
+        recommendations = await service.force_start_voting(session_id, code)
         room = service.get_room_by_code(code)
         expires_at = datetime.now(timezone.utc) + timedelta(minutes=room.duration_minutes)
 
@@ -233,10 +247,41 @@ async def _handle_force_finish(
             })
         else:
             await mgr.broadcast(code, {
-                "type": "no_match",
+                "type": "voting_finished",
+                "matches": [],
                 "detail": "No positive votes were cast",
             })
 
+        # Sonuçların istemciye ulaşması için kısa bekleme, ardından bağlantıları kapat
+        await asyncio.sleep(0.5)
         await mgr.close_room(code)
     except BaseAppException as e:
         await mgr.broadcast(code, {"type": "error", "detail": e.message})
+
+
+async def _finish_room_and_broadcast(service: RoomService, code: str, mgr: ConnectionManager):
+    """Tüm swipe'lar tamamlandığında odayı bitir ve sonuçları yayınla."""
+    try:
+        room = service.get_room_by_code(code)
+        if room.status != RoomStatus.VOTING:
+            return
+
+        best_matches = service._calculate_top_matches(room)
+        service.finish_room(room)
+
+        if best_matches:
+            await mgr.broadcast(code, {
+                "type": "voting_finished",
+                "matches": [{"tmdb_id": m.tmdb_id} for m in best_matches]
+            })
+        else:
+            await mgr.broadcast(code, {
+                "type": "voting_finished",
+                "matches": [],
+                "detail": "No positive votes were cast",
+            })
+
+        await asyncio.sleep(0.5)
+        await mgr.close_room(code)
+    except Exception as e:
+        logger.error(f"Error finishing room {code}: {e}")
