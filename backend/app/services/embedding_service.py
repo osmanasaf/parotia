@@ -211,7 +211,7 @@ class EmbeddingService:
 
             # Enforce minimum vote_count threshold for embedding quality
             vote_count = content.get('vote_count', 0)
-            if vote_count < 200:
+            if vote_count < 100:
                 logger.info(
                     f"Skipping low-vote-count content {content.get('tmdb_id')} (vote_count: {vote_count})"
                 )
@@ -268,7 +268,7 @@ class EmbeddingService:
 
             # Enforce minimum vote_count threshold
             vote_count = content.get('vote_count', 0)
-            if vote_count < 200:
+            if vote_count < 100:
                 logger.info(
                     f"Skipping low-vote-count content {content.get('tmdb_id')} from database (vote_count: {vote_count})"
                 )
