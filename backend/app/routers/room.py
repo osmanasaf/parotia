@@ -46,11 +46,21 @@ class ConnectionManager:
                 del self.active_connections[room_code]
 
     async def broadcast(self, room_code: str, message: dict):
-        for connection in self.active_connections.get(room_code, []):
+        connections = self.active_connections.get(room_code, [])
+        failed = []
+        for connection in connections:
             try:
                 await connection.send_json(message)
             except Exception:
                 logger.warning("Failed to send message to a WebSocket client")
+                failed.append(connection)
+        # Kopuk bağlantıları temizle
+        for conn in failed:
+            if room_code in self.active_connections:
+                try:
+                    self.active_connections[room_code].remove(conn)
+                except ValueError:
+                    pass
 
     async def close_room(self, room_code: str):
         for connection in self.active_connections.get(room_code, []):
@@ -213,7 +223,12 @@ async def _handle_swipe(
         })
 
     if all_done:
-        await _finish_room_and_broadcast(service, code, mgr)
+        # Tüm kartlar bitti ama odayı otomatik kapatmıyoruz.
+        # Creator 'force_finish' ile veya timer bitince oda kapanacak.
+        await mgr.broadcast(code, {
+            "type": "all_cards_swiped",
+            "detail": "All participants have finished swiping. Waiting for host to end session."
+        })
 
 async def _handle_force_start(
     service: RoomService, code: str, session_id: str, mgr: ConnectionManager

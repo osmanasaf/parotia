@@ -89,12 +89,14 @@ class RoomService:
         ).first()
 
         if existing:
+            # Mevcut katılımcı her durumda (WAITING, VOTING) yeniden bağlanabilir
             return room
 
         if room.status == RoomStatus.FINISHED:
             raise InvalidRoomActionException("Room has already finished")
 
         if room.status == RoomStatus.VOTING:
+            # Yeni (kayıtsız) katılımcı VOTING'e giremez
             raise RoomAlreadyStartedException()
 
         if not room.is_joinable():
@@ -102,6 +104,7 @@ class RoomService:
 
         self._add_participant(room, session_id)
         return room
+
 
     def submit_mood(self, session_id: str, room_code: str, mood: str) -> Room:
         """Record a participant's mood and mark them as ready."""
